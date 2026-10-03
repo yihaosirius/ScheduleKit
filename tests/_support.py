@@ -27,6 +27,12 @@ VALID_PASSWORD_HASH = (
     "hpwNpyeBFIdJh5nePsBpc3Uzj5g2swghtc+Gzhi/fds="
 )
 
+#: 测试用的假 LLM Key。刻意起一个"一眼能认出来"的值，并且**不做成真实 token 的
+#: 形状**（不含 sk- 之类前缀）——这样"配置接口绝不泄漏密钥"这条测试的断言
+#: 可以直接检查"这个字符串有没有出现在响应里"，而不是去猜哪些子串像密钥。
+#: 之前这里叫 "test-key"，结果撞上了 llm_path 里的子串导致测试假失败。
+FAKE_API_KEY = "FAKE-SECRET-VALUE-DO-NOT-LEAK"
+
 CONFIG_TEMPLATE = """\
 # 测试配置。注释存在的意义是验证写回时不会把注释吃掉。
 [server]
@@ -52,7 +58,7 @@ total_weeks = 16
 provider = "mock"
 base_url = "https://api.deepseek.com"
 model    = "deepseek-flash"
-api_key  = "test-key"
+api_key  = "{api_key}"
 thinking = false
 temperature = 1.0
 timeout_seconds = 60
@@ -72,6 +78,7 @@ def write_config(
     overrides: dict[str, dict[str, object]] | None = None,
     password_hash: str = VALID_PASSWORD_HASH,
     secret_key: str = VALID_SECRET,
+    api_key: str = FAKE_API_KEY,
     name: str = "config.toml",
 ) -> Path:
     """写一份可用的测试配置，返回路径。
@@ -80,7 +87,9 @@ def write_config(
     用 tomlkit 而不是字符串替换：值里带引号或换行时字符串替换会写坏文件。
     """
     doc = tomlkit.parse(
-        CONFIG_TEMPLATE.format(tz=TEST_TZ, password_hash=password_hash, secret_key=secret_key)
+        CONFIG_TEMPLATE.format(
+            tz=TEST_TZ, password_hash=password_hash, secret_key=secret_key, api_key=api_key
+        )
     )
     for section, values in (overrides or {}).items():
         if section not in doc:

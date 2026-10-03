@@ -108,9 +108,11 @@ def test_env_override_for_secret_key(work_dir: Path, monkeypatch: pytest.MonkeyP
 
 def test_empty_env_var_does_not_override(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """空字符串不算覆盖。否则 CI 里 export SK_LLM_API_KEY= 会把配置清空。"""
+    from tests._support import FAKE_API_KEY
+
     monkeypatch.setenv("SK_LLM_API_KEY", "")
     cfg = make_config(work_dir)
-    assert cfg.llm.api_key == "test-key"
+    assert cfg.llm.api_key == FAKE_API_KEY
 
 
 def test_sk_config_env_selects_file(work_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

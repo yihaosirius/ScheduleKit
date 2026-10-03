@@ -211,6 +211,7 @@ async def require_csrf(
 ReadAuth = Annotated[Principal, Depends(current_principal)]
 WriteAuth = Annotated[Principal, Depends(require_csrf)]
 SessionOnly = Annotated[Principal, Depends(require_session)]
+OptionalAuth = Annotated[Principal | None, Depends(optional_principal)]
 
 
 # --------------------------------------------------------------------------- #

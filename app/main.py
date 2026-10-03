@@ -54,17 +54,17 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        cfg.validate_for_startup()
-        ensure_dirs(cfg)
+        app.state.config.validate_for_startup()
+        ensure_dirs(app.state.config)
         log.info(
             "app.start %s",
             kv(
-                config=str(cfg.path),
-                data_dir=str(cfg.data_dir),
-                timezone=cfg.server.timezone,
-                provider=cfg.llm.provider,
-                host=cfg.server.listen_host,
-                port=cfg.server.listen_port,
+                config=str(app.state.config.path),
+                data_dir=str(app.state.config.data_dir),
+                timezone=app.state.config.server.timezone,
+                provider=app.state.config.llm.provider,
+                host=app.state.config.server.listen_host,
+                port=app.state.config.server.listen_port,
             ),
         )
         yield
@@ -88,6 +88,22 @@ def create_app(config: Config | None = None) -> FastAPI:
         quiet = request.url.path in QUIET_PATHS
         started = time.perf_counter()
 
+        # 每次都从磁盘重新读配置。
+        #
+        # 这不是"图省事"，而是**热加载的正确实现方式**：控制台改 [llm] 之后
+        # 必须立刻生效，而把"新值"同步到内存里的 Config 对象需要知道改了哪些字段
+        # （漏一个就会出现"改了没反应"）。重新读一遍文件是小开销（几 KB 的 TOML）
+        # 换来的是不可能漏字段。
+        #
+        # 读失败（文件被编辑器写坏等）时保留上一份内存配置：宁可让旧配置继续服务，
+        # 也不要因为一次配置写坏就让整个服务开始报 500。
+        try:
+            fresh = load_config(app.state.config.path)
+            app.state.config = fresh
+        except Exception as exc:  # noqa: BLE001
+            fresh = app.state.config
+            log.warning("config.reload_failed %s", kv(error=str(exc)))
+
         if not quiet:
             log.info(
                 "request.start %s",
@@ -101,18 +117,18 @@ def create_app(config: Config | None = None) -> FastAPI:
 
         # 请求体大小：先看 Content-Length 快速拒绝，避免把大 body 读进内存再判断。
         declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > cfg.server.max_request_bytes:
+        if declared and declared.isdigit() and int(declared) > fresh.server.max_request_bytes:
             return _error_response(
                 request,
                 status_code=413,
                 detail=(
                     f"请求体过大：{int(declared)} 字节，"
-                    f"上限 {cfg.server.max_request_bytes} 字节"
+                    f"上限 {fresh.server.max_request_bytes} 字节"
                 ),
                 trace_id=trace_id,
             )
 
-        con = connect(cfg.db_path)
+        con = connect(fresh.db_path)
         request.state.db = con
         response: Response
         try:
@@ -134,23 +150,25 @@ def create_app(config: Config | None = None) -> FastAPI:
         if refresh:
             from app.deps import CSRF_COOKIE, SESSION_COOKIE
 
-            secure = cfg.server.public_url.startswith("https://")
+            secure = fresh.server.public_url.startswith("https://")
             response.set_cookie(
                 SESSION_COOKIE,
                 refresh,
-                max_age=cfg.auth.session_ttl_days * 86400,
+                max_age=fresh.auth.session_ttl_days * 86400,
                 httponly=True,
                 samesite="lax",
                 secure=secure,
                 path="/",
             )
+            # 会话续期时如果 CSRF Cookie 丢了，一并补上——否则用户下一次写操作
+            # 会被 403 拦住，而且看起来完全没有原因。
             if CSRF_COOKIE not in request.cookies:
                 from app.security import issue_csrf
 
                 response.set_cookie(
                     CSRF_COOKIE,
-                    issue_csrf(cfg.auth.secret_key),
-                    max_age=cfg.auth.session_ttl_days * 86400,
+                    issue_csrf(fresh.auth.secret_key),
+                    max_age=fresh.auth.session_ttl_days * 86400,
                     httponly=False,
                     samesite="lax",
                     secure=secure,

@@ -18,7 +18,7 @@ import sys
 import uvicorn
 
 from app.config import ConfigError, load_config, resolve_config_path
-from app.logging import get_logger, setup_logging
+from app.logging import get_logger, kv, setup_logging
 
 log = get_logger("serve")
 

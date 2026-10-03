@@ -170,3 +170,75 @@
   - 新旧共存、验证后再切 —— 用户已明确排除，且会长期多占内存（服务器仅 1.6G）。
   - 自动恢复旧数据 —— 与"从零开始"冲突；归档只作保险，恢复是人工决定的事。
 - **影响**：`/root/legacy-schedulekit/` 需长期保留；`docs/deploy.md` 记录其位置与内容清单。
+## D-011 配置热加载靠「每请求重读文件」，而不是同步内存对象
+
+- **状态**：采纳（2026-10-03）
+- **背景**：控制台改 `[llm]` 后必须立即生效。而把"新值"同步进内存里的 `Config`
+  对象需要枚举改了哪些字段——漏一个就会出现"改了没反应"。
+- **决策**：HTTP 中间件在每个请求开始时从磁盘重读 `config.toml`（几 KB 的 TOML），
+  替换 `app.state.config`。读失败时**保留上一份内存配置**并打 WARNING。
+- **理由**：不可能漏字段；读失败时宁可让旧配置继续服务，也不要因为一次配置写坏
+  就让全站开始 500。这个取舍在"配置文件是人手改的"前提下明显划算。
+- **被否决**：
+  - 只在 `[llm]` 段做热加载（在 `update_config_section` 之后手写同步）。否决原因是
+    那需要为每个可热加载的键写一份同步代码，而漏写不会报错。
+  - 用文件 mtime 做失效判断。否决原因是 mtime 精度与"同一秒内改两次"都会漏，
+    而收益只是省一次几 KB 的解析。
+  - 要求重启才生效。否决原因是控制台的核心价值就是"改完立刻试"，重启会打断这个流程。
+- **影响**：`app/routers/settings.py` 的 PUT 在写盘后必须用 `_reload()` 重新读一遍再
+  构造响应，否则会返回"写之前"的值——用户看到的是"我改了但没生效"，
+  而他刷新后又发现其实生效了，这种假象会直接导致重复操作。
+
+## D-012 字段长度上限：以「模型 schema」为准，不以「手工录入」为准
+
+- **状态**：采纳（2026-10-03）
+- **背景**：`app/llm/tools.py` 给模型的约束是 title ≤ 20 字、notes ≤ 60 字；
+  `app/services/tasks.py` 给手工录入的限制是 60 / 500 字（用户自己打字，宽松合理）。
+  两者都需要，但**不能混用**。
+- **决策**：`services/normalize.py` 的上限常量**直接从 `app.llm.tools` 取**，
+  并在注释里写明为什么不能复用 `services/tasks.py` 的同名常量。
+- **理由**：schema 既是"给模型的约束"，也是"接受其输出的上限"。手工录入走另一套。
+  两者共用一个常量，必然有一侧是错的。
+- **被否决**：两边共用一个 `TITLE_MAX`。否决原因是**同名不同值是这类 bug 的温床**——
+  `from app.services.tasks import TITLE_MAX` 这行 import 看起来完全合理，
+  但语义是错的。实测的后果是：模型吐 60 字标题也能入库，而 prompt 里写着 ≤20 字，
+  于是"标题太长"这个 prompt 质量信号被静默吃掉。
+- **影响**：`normalize` 里 `TITLE_MAX = tools.TITLE_MAX`；
+  超长时的截断**必须写进 `overrides`**（静默截断会让 prompt 效果的信号消失）。
+
+## D-013 清理任务的计数按「条目数」算，不按「图片数」算
+
+- **状态**：采纳（2026-10-03）
+- **背景**：`purge_expired` 最初返回"被删草稿引用的图片路径列表"，调用方用它的长度
+  当"清理了几条"。
+- **决策**：返回 `PurgeResult{drafts: list[int], image_paths: list[str]}`，
+  计数用 `PurgeResult.count`（即 `len(drafts)`）。
+- **理由**：一条**没有图片**的草稿被删掉后，按图片数计数会报 0——
+  而"清理了 0 条"与"清理了 5 条"在排查磁盘问题时含义完全不同。
+  这个 bug 实测发生过：`housekeeping` 的 `drafts_purged` 一直显示 0，
+  没有异常、没有可疑日志，只是一个数字长期不对。
+- **被否决**：返回 `tuple[list[int], list[str]]`。否决原因是位置参数在两个
+  同类型列表上极易传反，而 dataclass 的具名字段不会。
+- **影响**：`app/housekeeping.py` 与 `app/routers/drafts.py` 都改用 `.count`；
+  `tests/test_drafts.py::test_purge_count_is_not_based_on_images` 专门守这一条。
+
+## D-014 适配器的构造函数收「整份 Config」，不收「配置段」
+
+- **状态**：采纳（2026-10-03）
+- **背景**：`build_llm(cfg)` 最初把 `cfg.llm`（`LLMConfig` 段）传给适配器，
+  而适配器在 `extract()` 里调 `cfg.validate_for_llm()`——那个方法在 `Config` 上、
+  不在 `LLMConfig` 上，于是 `AttributeError`。
+- **决策**：适配器持有 `config`（整份）与 `cfg`（`config.llm` 段的别名），
+  校验走 `self.config.validate_for_llm()`。
+- **理由**：适配器需要的是"能否调用"这个判断，而提供该判断的对象是整份配置。
+  传段进来等于让它去做一件它做不到的事。
+- **被否决**：在 `LLMConfig` 上加一个 `validate_for_llm()`。否决原因是那样会让
+  "LLM 是否可用"这件事变成两个真相处（配置段自己也能判断），
+  而它依赖 `base_url` 与 `api_key` 之外的上下文时又会需要拆回来。
+- **影响**：**这条决策是被一次真机验证抓出来的，不是单测**。原因是测试里
+  `provider = "mock"` 而 mock 不校验配置，所以 422 个测试全绿，
+  真机上却是"上传直接 500"。因此新增
+  `tests/test_llm_channels.py::test_registry_adapters_can_validate_configuration`，
+  对**真实适配器**也跑一次 extract；并且测试替身的形状必须与真实配置一致
+  （同时提供 `.llm` 与 `validate_for_llm()`），否则替身就成了 bug 的掩体。
+

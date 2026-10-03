@@ -338,3 +338,217 @@
   - 非标准端口下 Service Worker 作用域 / Cookie SameSite / 添加到主屏幕三项
     仍需**真机确认**，这一步只能在应用部署后做。
 
+---
+
+## 2026-10-03 19:01 · 服务端全链路完成：路由、LLM 三通道、两阶段录入、课表上下文、记忆系统
+
+- 目标：把"识别 → 草稿 → 确认 → 入库"这条主链路端到端做通，并把
+  课表上下文与记忆系统接进去。这是产品的核心，也是风险最集中处。
+
+- 决策与理由：
+  - **每请求从磁盘重读配置**（`app/main.py` 中间件）来实现热加载，而不是
+    "改完把新值同步进内存对象"。
+    - 理由：同步方案必须知道**改了哪些字段**，漏一个就会出现"改了没反应"；
+      重读一遍几 KB 的 TOML 换来"不可能漏字段"。读失败时保留上一份内存配置
+      （宁可旧配置继续服务，也不要因一次写坏就全站 500）。
+    - 被否决：只在 `[llm]` 段做热加载（要在 `update_config_section` 之后手写同步逻辑）。
+    - 被否决：用文件 mtime 做失效判断。否决原因是 mtime 精度与"同一秒内改两次"
+      都会漏，而收益只是省一次几 KB 的解析。
+  - **字段长度上限以模型 schema 为准，不以手工录入为准**。
+    `app/llm/tools.py` 给模型的约束是 20/60 字；`services/tasks.py` 给手工录入的是
+    60/500 字。`normalize` 必须用**前者**。
+    - 被否决：两边共用一个常量。否决原因见下面的踩坑——那正是最初的 bug。
+  - **清理的计数按"条目数"算，不按"图片数"算**（新增 `PurgeResult`）。
+    - 被否决：让 `purge_expired` 继续只返回图片路径。否决原因是那样"清理了几条"
+      会长期显示 0，而这个数字正是排查磁盘问题的依据。
+  - **"所有通道都失败"必须是 `LLMChannelRejected` 的子类**，而不是笼统的
+    `LLMToolCallMissing`。
+    - 理由：调用方要能区分"该改 prompt"（拒绝）与"该重试"（临时故障）。
+      所以新增 `LLMAllChannelsFailed(LLMToolCallMissing, LLMChannelRejected)`。
+    - 被否决：直接抛 `LLMChannelRejected`。否决原因是会丢掉"全部通道"这个信息，
+      而上层需要它来决定是否值得换 provider。
+  - **草稿重试是原地更新同一条草稿**，而不是新建。
+    - 被否决：新建草稿。否决原因是用户的意图是"再来一次"，不是"我又传了一遍"；
+      新建会让草稿箱堆出同一张图的多个副本。
+  - **确认页用 hash 路由**（`/#/drafts/{id}`）而不是 history 路由。
+    - 理由：hash 链接在任何静态托管/反代配置下都能直接打开，少一个会配错的地方。
+    - 被否决：history 路由 + SPA 回退。否决原因是它要求服务端把未知路径全部回退到
+      index.html，而这个回退一旦把 `/api/*` 也吃掉，接口 404 就会变成"返回了 HTML"，
+      前端报的错会指向完全无关的地方。
+
+- 触及文件：
+  - 新增：`app/schemas.py`
+  - 新增：`app/routers/{__init__,auth,tasks,ingest,drafts,memories,courses,settings,ui}.py`
+  - 新增：`app/services/{ingest,memory,timetable,context,normalize,drafts}.py`
+  - 新增：`app/llm/{__init__,base,tools,structured,registry,mock,chat,responses}.py`
+  - 新增：`app/housekeeping.py`
+  - 新增：`tests/{test_api,test_tasks,test_security,test_drafts,test_memory,
+    test_normalize,test_timetable_context,test_llm_channels}.py`
+  - 修改：`app/main.py`（请求级配置热加载）、`app/deps.py`（新增 `OptionalAuth`）、
+    `app/housekeeping.py`（按条目数计数）、`app/routers/drafts.py`（purge 计数）、
+    `app/services/drafts.py`（新增 `PurgeResult`）、
+    `app/services/normalize.py`（长度上限改用 schema 常量）、
+    `tests/_support.py`（假 Key 改成可识别的字符串）、
+    `tests/conftest.py`（新增 `configured` / `api` / `anon` / `bare_con` 装置）
+  - 重写：`README.md`
+
+- 执行过的命令与结果：
+  - `uv run pytest -q -p no:cacheprovider` 多轮，**修复过程中反复出现失败**，
+    最后一次退出码 0：`415 passed, 1 skipped`。
+  - 逐轮暴露的真实缺陷（都不是笔误，是设计问题）：
+    1. `test_settings_update_is_hot` / `test_term_settings_validation` /
+       `test_status_warns_when_term_expired` 失败 → 根因是**配置写盘了但内存没重载**，
+       PUT 返回的还是旧值。改成每请求重读 + `_reload()` 后再构造响应。
+    2. `test_timetable_now_endpoint` → `ERROR sk.http ... NameError:
+       name 'courses' is not defined`（`/api/timetable/now` 里漏了取课表那一行，
+       被上面三层 `try` 包住所以只表现为 500）。
+    3. `test_title_truncated_to_limit_and_reported` 报 `assert 60 == 20`、
+       `test_notes_cleaned_and_bounded` 报 `assert 200 == 60` →
+       **normalize 复用了手工录入的 60/500 上限，而模型 schema 规定的是 20/60**，
+       于是模型超长输出被静默接受（连 override 都不产生）。
+    4. `test_housekeeping_purges_expired_drafts` 报 `assert 0 == 1` →
+       追下去发现 `purge_expired` 返回的是**图片路径列表**，一条没有图片的草稿
+       被删掉后计数为 0。用 `PurgeResult` 修掉，并补了一条专门测这个的用例。
+    5. `test_settings_never_leaks_api_key` 假失败 → 我把断言写成"响应里不能出现
+       `test-key` 这个字符串"，而响应体里有字段名 `api_key` / `has_api_key`，
+       于是一个**关于字段名**的断言被我写成了**关于值**的断言，含义完全错位。
+       把假 Key 换成一眼可识别的 `FAKE-SECRET-VALUE-DO-NOT-LEAK` 后，
+       断言变成"这个具体值不许出现"，意图才与写法一致。
+  - 探测（外网）：`8443 CONNECTED`；Node 请求拿到
+    `STATUS 502 / CERT CN=canisa1ph.duckdns.org / PROTOCOL TLSv1.3`。
+
+- 观察到的现象 / 反直觉之处 / 踩坑：
+  - **反直觉**：`test_400_is_not_retried` 一开始失败，报"所有结构化通道都失败了"。
+    我原以为测试写错了，读代码才发现是我的**错误分类有问题**：全部通道被拒时抛的是
+    `LLMToolCallMissing`，而它在语义上属于"拒绝"而不是"缺失"。新增
+    `LLMAllChannelsFailed` 同时继承两者后，调用方与测试都能按"该改 prompt 还是该重试"来判断。
+    **测试失败暴露的是我的语义设计，不是测试写错了。**
+  - **反直觉**：normalize 的长度上限"看起来"复用了正确的常量（都是 `TITLE_MAX`），
+    但两个模块各有一个同名常量、值不同。**同名不同值是这类 bug 的温床**：
+    import 语句看上去完全合理。修法是把「给模型的约束」明确成唯一来源
+    （`app/llm/tools.py`），并在 normalize 里写清楚为什么不能复用 tasks 的常量。
+  - **反直觉**：`purge_expired` 返回 `[]` 却**确实删掉了记录**。
+    第一眼像是"函数没执行"，实际是返回值语义与调用方期望不一致——
+    调用方要的是"删了几条"，函数给的是"涉及哪些图片"。
+    这类 bug 没有异常、没有日志异常，只会让一个数字长期是 0。
+  - 请求级重读配置让"配置热加载"变简单了，但**测试里对它的依赖也变强了**：
+    所有断言"改了就生效"的测试其实在测中间件，而不只是测 router。
+    这一点写在这里以免后来者把中间件那段当成可以省掉的优化。
+  - `sqlite3.Row` 支持 `row["name"]` 与 `row[0]`，但不支持 `.name`——
+    写 `row.image_path` 会得到 `AttributeError`。本轮的临时调试脚本踩过。
+
+- 未决问题与下一步：
+  - **前端 SPA 完全没写**。`app/static/spa/index.html` 不存在，所以
+    `GET /` 会返回一个 503 的"前端尚未构建"说明页（刻意做成这样：
+    比一个空白 404 更容易判断问题在哪）。这是下一步的主要工作量。
+  - **部署产物没写**：`deploy/install.sh`、`deploy/schedulekit.service`、
+    `docs/deploy.md`、`deploy/Caddyfile` 的渲染逻辑。
+  - **Scriptable 小组件与快捷指令文档没写**：`clients/scriptable/`、`shortcuts/`、
+    `docs/shortcuts.md`、`docs/widget.md`、`docs/api.md`。
+  - **`docs/push-notes.md` 未写**（推送方案调研，本期不做）。
+  - 真机验收（PWA 可安装性、非标端口下的 Service Worker 作用域与 Cookie SameSite）
+    必须等应用部署到 443/8443 之后才能做。
+  - 本地已有提交待推送，**按约定等用户确认**（本会话的推送一律交给用户执行）。
+
+---
+
+## 2026-10-03 19:06 · 真实 HTTP 端到端验证：又抓出两个单测看不见的缺陷
+
+- 目标：把"测试全绿"和"真的能用"分开验证。415 个测试跑在 httpx 的
+  ASGITransport 上，**从不经过真正的启动入口、也从不发真实 HTTP**。
+  这一轮要回答的问题是："`python -m app.serve` 到底起不起来、接口在真
+  网络栈上是不是也这样"。
+
+- 决策与理由：
+  - **用 Node 写一次性的端到端脚本**，而不是 PowerShell。
+    - 理由：本会话 PowerShell 的 `WebSession` 会**丢 Cookie**（第一轮登录成功后
+      后续请求仍报 401），而 Node 的 fetch + 手工 cookie jar 行为可预测。
+      这与之前"PowerShell 的 schannel 建不了 TLS"是同一类环境问题。
+    - 被否决：把 `Invoke-RestMethod` 的会话问题查清楚。否决原因是那是在调试
+      测试工具而不是被测系统，收益为零。
+    - 被否决：把这些断言写成 pytest。否决原因是它们需要**真的起一个进程**，
+      会引入端口占用与启动等待，而它们要验证的恰恰是"进程能不能起来"，
+      用进程内测试去验证是自欺。
+  - **端到端脚本放 `.pytest-run/`（gitignore 内）**，不进仓库。
+    - 理由：它是"这一次的环境验证"，依赖本地 boot config 与固定端口；
+      进仓库会变成一个需要长期维护的第二套测试体系。
+    - 被否决：放进 `tests/` 并标记为 slow。否决原因同上——它要起真进程，
+      不适合混进默认测试路径。
+  - **把 mock provider 用于本地 boot 验证**：`config.toml.example` 默认
+    `provider = "responses"`，没有真 Key 时上传必然失败。验证离线链路时
+    显式把 boot config 改成 `mock`。
+
+- 触及文件：
+  - 新增（gitignore 内，不入库）：`.pytest-run/e2e.mjs`、`.pytest-run/reorder_decisions.py`
+  - 新增：`tests/test_serve.py`（服务入口的测试，见下面第 1 条）
+  - 修改：`app/serve.py`（补 `kv` 的 import）
+  - 修改：`app/llm/structured.py`（适配器构造函数收整份 `Config`；
+    `extract` 改用 `self.config.validate_for_llm()`）
+  - 修改：`tests/test_llm_channels.py`（`Cfg` 替身改为"同时提供 `.llm` 段与
+    `validate_for_llm()`"；新增对**真实适配器**跑 extract 的用例）
+  - 修改：`docs/decisions.md`（新增 D-011 ~ D-014，并按编号重排全文）
+
+- 执行过的命令与结果：
+  - 起真实服务：`SK_CONFIG=... uv run python -m app.serve --port 8123`
+    - **第一次失败（exit 1）**：
+      ```
+      File "D:\ScheduleKit\app\serve.py", line 48, in main
+        kv(config=..., host=host, port=port, reload=args.reload),
+      NameError: name 'kv' is not defined
+      ```
+      缺一个 import。**而 415 个测试全绿**——因为没有一个测试调用过
+      `serve.main`：它们都通过 `create_app` 直接构造应用。
+      修复后补 `tests/test_serve.py`（用替身拦下 `uvicorn.run`，
+      断言 factory / host / port / access_log / proxy_headers / reload_dirs）。
+  - 起服务后逐个探测：`healthz 200` / `manifest 200 application/manifest+json` /
+    `sw.js 404`（文件还没写）/ `/ 503`（SPA 未构建，符合预期）/
+    `未鉴权 /api/tasks 401` / `/api/nope 404` / `/app/main.py 404`。
+  - 跑 `.pytest-run/e2e.mjs`：第一轮 **14/27**，第二轮 **26/27**，
+    重置数据库后 **27/27**。
+    第一轮暴露出第二个真缺陷，来自服务端日志：
+    ```
+    ERROR sk.http [t=01e06793] request.unhandled path=/api/ingest
+      error=AttributeError detail="'LLMConfig' object has no attribute 'validate_for_llm'"
+    ```
+    根因：`build_llm` 把 `cfg.llm`（配置**段**）传给了适配器，而适配器在
+    `extract()` 里调 `validate_for_llm()`——该方法在 `Config` 上、不在 `LLMConfig` 上。
+    **真机表现是"上传直接 500"，而单测全绿**，因为测试里
+    `provider = "mock"` 而 mock 不校验配置。
+  - 最终 `uv run pytest -q -p no:cacheprovider` → 退出码 0：`422 passed, 2 skipped`。
+
+- 观察到的现象 / 反直觉之处 / 踩坑：
+  - **最重要的一条：测试通过率与"能不能跑"几乎无关。**
+    415 个测试全绿的同时，`python -m app.serve` 起来就崩。原因是测试全部
+    绕过了两个东西：**真正的入口**（`serve.main`）与**真正的网络栈**
+    （httpx 的 ASGITransport 不走 socket）。这两处恰好是"线上一崩就全崩"的位置。
+    所以现在 `tests/test_serve.py` 守着入口，而真机验证必须单独做一次。
+  - **反直觉**：`AttributeError` 只在**真实适配器**上出现，mock 完全正常。
+    教训是**替身的形状必须与真实对象一致**——我最初的 `Cfg` 替身只有 `llm` 段的字段，
+    于是它同时掩盖了"传错对象"与"方法不存在"两件事。
+    已经把这条写进 `tests/test_llm_channels.py` 的注释。
+  - **反直觉**：PowerShell 的 `Invoke-RestMethod -WebSession` 在
+    `http://127.0.0.1:8123` 上会丢 Cookie（登录返回 200 且
+    `authenticated=true`，但后续请求全是 401）。这不是服务端问题：
+    同一套请求用 Node 跑就是 27/27。**排查这类现象要先换客户端再怀疑服务端。**
+  - **反直觉**：`purge_expired` 返回 `[]` 却**确实删掉了记录**（见上一条 trace）。
+    这一轮又遇到一次同源问题：它返回的是"图片路径"，而调用方要的是"删了几条"。
+    已经在 D-013 里独立成一条决策。
+  - 我的端到端脚本第一版把"无 CSRF 的写操作被拒"写成了
+    `r.status !== 403 && false || r.status === 403` —— 这个表达式的短路行为
+    让它永远为真，于是"伪造 CSRF"这一条在第一轮里是**假通过**。
+    改成显式发一个伪造 token、断言 403 之后才有意义。
+    **断言写错比没有断言更危险**：它会给你一个"已经验证过了"的错误信心。
+  - 数据库残留导致过一次假失败（`unordered: 2` 而不是 0）。
+    端到端脚本必须从干净库开始，否则它在测上一轮的残留状态。
+
+- 未决问题与下一步：
+  - 优先级最高的下一步是 **SPA 前端**（`web/` → `app/static/spa/`）：
+    双列表 UI、交互动画、PWA 外壳、草稿确认页、设置 / 状态监测 / 课表 / 记忆面板。
+  - 然后是 **部署产物**（`deploy/install.sh`、`deploy/schedulekit.service`、
+    `docs/deploy.md`；`deploy/Caddyfile` 已有，但渲染脚本没有）、
+    **Scriptable 小组件**与**快捷指令文档**。
+  - `docs/api.md` 需要按现有接口写一遍（19+ 个端点），它是快捷指令与
+    将来接 agent 时的唯一接口文档。
+  - 真机验收清单（PWA 可安装性、非标准端口下的 Service Worker 作用域、
+    Cookie SameSite、添加到主屏幕）必须在部署到 8443 之后做。
+

@@ -64,3 +64,80 @@ def work_dir(request: pytest.FixtureRequest) -> Path:
             path = RUN_ROOT / f"{safe}-{len(list(RUN_ROOT.iterdir()))}"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# --------------------------------------------------------------------------- #
+# 端到端装置
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def configured(work_dir: Path):
+    """已在临时目录建好配置 + 数据库的 :class:`Config`。"""
+    from app.config import load_config
+    from app.db import connect
+    from app.migrations import runner
+    from app.paths import ensure_dirs
+    from tests._support import write_config
+
+    path = write_config(work_dir)
+    cfg = load_config(path)
+    ensure_dirs(cfg)
+    con = connect(cfg.db_path)
+    runner.run(con)
+    con.close()
+    return cfg
+
+
+@pytest.fixture
+async def api(configured):
+    """已登录的 HTTP 客户端。
+
+    用 ``httpx.ASGITransport`` 直连应用，不起真端口——测试因此不需要
+    处理端口占用与启动等待。CSRF 与 Cookie 由同一个 client 维护，
+    与浏览器的行为一致。
+    """
+    import httpx
+
+    from app.main import create_app
+    from tests._support import VALID_PASSWORD
+
+    app = create_app(configured)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url=str(configured.server.public_url),
+        follow_redirects=False,
+    ) as client:
+        # 先拿 CSRF（/me 会给一个），再登录
+        await client.get("/api/auth/me")
+        response = await client.post("/api/auth/login", json={"password": VALID_PASSWORD})
+        assert response.status_code == 200, response.text
+        # 登录会换一份新的 cookie，重新取 CSRF
+        await client.get("/api/auth/me")
+        client.headers["X-CSRF-Token"] = client.cookies.get("sk_csrf", "")
+        yield client
+
+
+@pytest.fixture
+async def anon(configured):
+    """未登录的客户端，用于验证鉴权边界。"""
+    import httpx
+
+    from app.main import create_app
+
+    app = create_app(configured)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url=str(configured.server.public_url), follow_redirects=False
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+def bare_con(configured):
+    """直接操作数据库的连接，用于构造前置数据。"""
+    from app.db import connect
+
+    con = connect(configured.db_path)
+    yield con
+    con.close()
+
