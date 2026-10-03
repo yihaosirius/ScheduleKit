@@ -58,11 +58,174 @@ function durationSlots(start: string, end: string): number {
   return Math.max(1, slotOf(end) - slotOf(start))
 }
 
-/** 某个 weekday 的课程（来自 matrix） */
+/** 某个 weekday 的课程（来自 matrix，服务端已按开始时间排好） */
 function dayEntries(weekdayIndex: number): Array<Record<string, unknown>> {
   const key = WEEKDAYS[weekdayIndex]
   const rows = (key && timetable.value?.matrix?.[key]) || []
   return rows as Array<Record<string, unknown>>
+}
+
+/**
+ * 某个 weekday 要渲染的块（**扁平列表**）。
+ *
+ * 刻意不返回"行"的嵌套结构：块的定位是相对 `.grid__col` 的绝对定位
+ * （top 由时间算出），中间多套一层容器就会让 top 相对错的对象，
+ * 整列的位置全错。所以这里把重叠组的布局信息拍平到每个块上。
+ */
+function dayBlocks(weekdayIndex: number): Array<{
+  entry: Record<string, unknown>
+  style: Record<string, string>
+  badge: string
+  /** 并排时才为 true：窄栏里放不下时间与教室 */
+  split: boolean
+}> {
+  const entries = dayEntries(weekdayIndex)
+  if (!entries.length) return []
+  const total = term.value.total_weeks || 16
+  const out: Array<{
+    entry: Record<string, unknown>
+    style: Record<string, string>
+    badge: string
+    split: boolean
+  }> = []
+  for (const group of overlapGroups(entries)) {
+    const { styles, badges } = layoutColumns(group, total)
+    group.forEach((entry, i) => {
+      out.push({
+        entry,
+        style: styles[i] ?? {},
+        badge: badges[i] ?? '',
+        split: group.length > 1,
+      })
+    })
+  }
+  return out
+}
+
+const toMinutes = (t: string): number => {
+  const [h, m] = t.split(':').map(Number)
+  return (h ?? 0) * 60 + (m ?? 0)
+}
+
+/**
+ * 一天里**时间重叠**的时段分组。
+ *
+ * 为什么需要：网格块是按时间绝对定位的（top/height 只由 start/end 决定），
+ * 所以同一时间段的两个时段会算出完全相同的坐标、直接叠在一起，后者盖住前者。
+ * 而"同一时间、不同周次去不同教室"在国内大学很常见（例：周三 13:25
+ * 1-8 周在 A 教室、9-16 周在 B 教室）。
+ *
+ * 分组用扫描线：按开始时间排序后，只要下一段的开始时间早于**当前组的
+ * 最晚结束时间**，就并进同一组（这样能正确处理链式重叠 A-B、B-C）。
+ */
+function overlapGroups(entries: Array<Record<string, unknown>>): Array<Array<Record<string, unknown>>> {
+  const sorted = [...entries].sort(
+    (a, b) => toMinutes(String(a.start_time)) - toMinutes(String(b.start_time)),
+  )
+  const groups: Array<Array<Record<string, unknown>>> = []
+  let current: Array<Record<string, unknown>> = []
+  let groupEnd = -1
+
+  for (const entry of sorted) {
+    const start = toMinutes(String(entry.start_time))
+    if (current.length && start >= groupEnd) {
+      groups.push(current)
+      current = []
+      groupEnd = -1
+    }
+    current.push(entry)
+    groupEnd = Math.max(groupEnd, toMinutes(String(entry.end_time)))
+  }
+  if (current.length) groups.push(current)
+  return groups
+}
+
+/** 把周次串（"1-8" / "1,3,5" / "2-8,10"）展开成周次集合。留空表示全周。 */
+function weeksToSet(spec: string, total: number): Set<number> {
+  const raw = (spec || '').trim()
+  const out = new Set<number>()
+  if (!raw) {
+    for (let w = 1; w <= total; w += 1) out.add(w)
+    return out
+  }
+  for (const part of raw.split(',')) {
+    const piece = part.trim()
+    if (!piece) continue
+    if (piece.includes('-')) {
+      const parts = piece.split('-').map((x) => Number(x.trim()))
+      const a = parts[0]
+      const b = parts[1]
+      if (a === undefined || b === undefined) continue
+      if (!Number.isFinite(a) || !Number.isFinite(b)) continue
+      for (let w = a; w <= b; w += 1) out.add(w)
+    } else {
+      const n = Number(piece)
+      if (Number.isFinite(n)) out.add(n)
+    }
+  }
+  return out
+}
+
+/**
+ * 给重叠组里的每一块算出定位样式与要显示的周次提示。
+ *
+ * 周次提示的策略：**只在重叠时才显示**。单块占满整列时不显示周次
+ * （那是噪音，正常课表也不会写）；一旦并排，就必须能区分
+ * "这几周上 A、那几周上 B"，否则并排只是把两块挤窄而已。
+ */
+function layoutColumns(
+  group: Array<Record<string, unknown>>,
+  totalWeeks: number,
+): {
+  styles: Array<Record<string, string>>
+  badges: Array<string>
+} {
+  const n = group.length
+  const styles = group.map((_, i) => {
+    const pct = 100 / n
+    return {
+      left: `${i * pct}%`,
+      // 减去 1.5% 留出缝隙，两块之间才看得出分界
+      width: `calc(${pct}% - ${(i === n - 1 ? 0 : 1.5).toFixed(2)}%)`,
+    }
+  })
+
+  // 组内每个周次分别归谁
+  const owner = new Map<number, Array<Record<string, unknown>>>()
+  for (const entry of group) {
+    for (const w of weeksToSet(String(entry.weeks ?? ''), totalWeeks)) {
+      const list = owner.get(w) ?? []
+      list.push(entry)
+      owner.set(w, list)
+    }
+  }
+
+  const badges = group.map((entry) => {
+    const mine = weeksToSet(String(entry.weeks ?? ''), totalWeeks)
+    // 只保留"这些周只有我在上"的周次
+    const exclusive: number[] = []
+    for (const w of [...mine].sort((a, b) => a - b)) {
+      if ((owner.get(w) ?? []).length === 1) exclusive.push(w)
+    }
+    const ranges: string[] = []
+    for (const w of exclusive) {
+      const last = ranges[ranges.length - 1]
+      if (!last) {
+        ranges.push(String(w))
+      } else if (last.includes('-')) {
+        const [, end] = last.split('-')
+        if (Number(end) + 1 === w) ranges[ranges.length - 1] = `${last.split('-')[0]}-${w}`
+        else ranges.push(String(w))
+      } else if (Number(last) + 1 === w) {
+        ranges[ranges.length - 1] = `${last}-${w}`
+      } else {
+        ranges.push(String(w))
+      }
+    }
+    return ranges.join(',')
+  })
+
+  return { styles, badges }
 }
 
 async function load(): Promise<void> {
@@ -216,19 +379,32 @@ onMounted(load)
           <div class="grid__head">{{ day }}</div>
           <div class="grid__col" :style="{ height: `${SLOTS * 22}px` }">
             <div v-for="slot in SLOTS" :key="slot" class="grid__cell" aria-hidden="true" />
+            <!-- 时间重叠的块并排显示（left/width 由 layoutColumns 算出）。
+                 直接挂在这一层：块的 top 是相对 .grid__col 的绝对定位，
+                 中间再套容器会让 top 相对错的对象。 -->
             <div
-              v-for="(entry, index) in dayEntries(dayIndex)"
+              v-for="(block, index) in dayBlocks(dayIndex)"
               :key="index"
               class="block"
+              :class="{ 'block--split': block.split }"
+              :data-color="block.entry.color || ''"
               :style="{
-                top: `${slotOf(String(entry.start_time)) * 22}px`,
-                height: `${durationSlots(String(entry.start_time), String(entry.end_time)) * 22 - 2}px`,
+                top: `${slotOf(String(block.entry.start_time)) * 22}px`,
+                height: `${durationSlots(String(block.entry.start_time), String(block.entry.end_time)) * 22 - 2}px`,
+                left: block.style.left,
+                width: block.style.width,
               }"
-              :title="`${entry.course_name} ${entry.start_time}–${entry.end_time}（${entry.weeks} 周）`"
+              :title="`${block.entry.course_name} ${block.entry.start_time}–${block.entry.end_time}（第 ${block.entry.weeks || '全部'} 周）${block.entry.location ? ' @ ' + block.entry.location : ''}`"
             >
-              <span class="block__name">{{ entry.course_name }}</span>
-              <span class="block__time">{{ entry.start_time }}–{{ entry.end_time }}</span>
-              <span v-if="entry.location" class="block__where">{{ entry.location }}</span>
+              <span class="block__name">{{ block.entry.course_name }}</span>
+              <!-- 周次只在并排时显示：单块占满整列时它是噪音 -->
+              <span v-if="block.badge" class="block__weeks">{{ block.badge }}周</span>
+              <span v-if="!block.split" class="block__time">
+                {{ block.entry.start_time }}–{{ block.entry.end_time }}
+              </span>
+              <span v-if="block.entry.location && !block.split" class="block__where">
+                {{ block.entry.location }}
+              </span>
             </div>
           </div>
         </div>
@@ -413,8 +589,10 @@ onMounted(load)
 
 .block {
   position: absolute;
-  left: 2px;
-  right: 2px;
+  /* 不再用 left/right 定宽：并排时 left/width 由 JS 给出（layoutColumns）。
+     单块时 JS 给的是 left:0% / width:100%，效果与原来的 left/right: 2px 相同
+     而少一层定位假设。 */
+  box-sizing: border-box;
   padding: 4px 5px;
   border-radius: 6px;
   background: var(--accent);
@@ -426,6 +604,27 @@ onMounted(load)
   transition: transform var(--dur-fast) var(--ease);
 }
 
+/* 并排的块：窄栏里只留课名与周次，并加左边线以示分界 */
+.block--split {
+  padding: 3px 4px;
+  border-left: 2px solid rgba(255, 255, 255, 0.55);
+}
+
+/* 课程色标。前端的设计令牌里没有 --c-<name> 系列，所以没定义时
+   会退回 .block 的默认底色 —— 能区分（靠左边线）但不好看。
+   这里把常见色名映射成实际色值，避免"配了颜色却看不出来"。 */
+.block[data-color='blue'] { background: #4a6fa5; }
+.block[data-color='teal'] { background: #2f7d75; }
+.block[data-color='green'] { background: #3f7d4f; }
+.block[data-color='lime'] { background: #5c7a33; }
+.block[data-color='amber'] { background: #9a6b1f; }
+.block[data-color='orange'] { background: #a85f28; }
+.block[data-color='rose'] { background: #96505f; }
+.block[data-color='violet'] { background: #6a5490; }
+.block[data-color='indigo'] { background: #4c5798; }
+.block[data-color='cyan'] { background: #2d6d80; }
+.block[data-color='slate'] { background: #5a6472; }
+
 .block:active {
   transform: scale(0.97);
 }
@@ -434,6 +633,16 @@ onMounted(load)
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 周次提示：只在并排（时间重叠）时出现，用来区分"这几周上哪门" */
+.block__weeks {
+  font-size: 8px;
+  font-weight: 600;
+  opacity: 0.95;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
