@@ -1,7 +1,35 @@
 [project]
 name = "schedulekit"
 version = "0.1.0"
-description = "Add your description here"
+description = "个人任务管理套件：双列表 WebUI + LLM 两阶段录入 + 课表上下文 + 记忆系统"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pillow>=10.0",
+    # 保留注释的 TOML 读写：控制台就地改 config.toml 时不能把注释吃掉
+    "tomlkit>=0.13",
+    "python-multipart>=0.0.9",
+    # Windows 没有系统 tzdata，zoneinfo 需要这个包才能解析 "Asia/Shanghai"
+    "tzdata>=2024.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "anyio>=4.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+# 沙箱里 .pytest_cache 建不出来，加 -p no:cacheprovider 也没用时会退化成警告，
+# 这里干脆把警告也关掉，避免干扰测试输出。
+filterwarnings = ["ignore::DeprecationWarning"]

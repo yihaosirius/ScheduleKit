@@ -1,0 +1,80 @@
+# ScheduleKit 的 Caddy 站点配置。
+#
+# 本文件由 deploy/install.sh 从 config.toml 渲染生成，也可以手工维护——
+# 但**不要**在里面写死 token / 密码：那是 config.toml 的职责。
+#
+# 与上一版的差异（重写时刻意调整）：
+#   * 站点从 :8443 改到标准 :443。自建 PWA 走非常规端口会踩到
+#     「添加到主屏幕」「Service Worker 作用域」「Cookie SameSite」三处坑，
+#     而 443 现在没有别的服务占用。
+#   * 证书目录从 /etc/schedulekit/certs 迁到 /etc/schedulekit-tls。
+#     原因是旧证书目录的属主是已删除的 schedulekit 用户，而 Caddy 需要读
+#     私钥；把证书与「应用要写的配置目录」彻底分开，权限模型才自洽
+#     （/etc/schedulekit 属应用、/etc/schedulekit-tls 属 root:caddy）。
+#   * 仍然用显式 tls <证书路径> 而不是让 Caddy 自动 ACME —— 证书由 acme.sh
+#     走 DNS-01 签发，不需要 80/443 入站做 HTTP-01，也就不触发大陆备案条件。
+
+{
+	# 关掉管理端点，单机不需要
+	admin off
+
+	# 日志写 stdout，由 systemd 收进 journald。
+	#
+	# 这里**不能**写 `output journal`：那个 writer 属于第三方插件
+	# （模块名 caddy.logging.writers.journal），标准构建里没有，
+	# 会导致 `caddy validate` 直接失败：
+	#   module not registered: caddy.logging.writers.journal
+	# 走 stdout 的效果完全一样 —— Caddy 由 systemd 托管，stdout 就是 journald。
+	log {
+		output stdout
+		format console
+	}
+}
+
+https://canisa1ph.duckdns.org {
+	tls /etc/schedulekit-tls/fullchain.pem /etc/schedulekit-tls/privkey.pem
+
+	encode zstd gzip
+
+	# 安全响应头。
+	#
+	# CSP 与上一版的差别：`style-src` 保留了 'unsafe-inline'（Vant 的组件
+	# 会注入内联样式），`font-src` 放开 data:（图标字体内联），`worker-src`
+	# 允许 blob:（Service Worker 注册路径），其余仍然收到最紧。
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self'; worker-src 'self' blob:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+		-Server
+	}
+
+	# 请求体大小限制交给应用自己管（超限返回 413），这里不设 request_body：
+	# 该指令是 Caddy 2.10 才引入的，为一个冗余的纵深防御去赌版本不划算。
+	# reverse_proxy 默认是流式转发，不会把整个 body 缓冲进内存。
+
+	reverse_proxy 127.0.0.1:8000 {
+		# 让应用拿到真实客户端 IP（登录限流按 IP 计数）
+		header_up X-Real-IP {remote_host}
+	}
+
+	# 带哈希指纹的静态资源可以长缓存。app/static/spa/assets/ 下的文件名
+	# 由 Vite 生成，内容变则文件名变，所以这里敢写 immutable。
+	@immutable path /assets/* /static/spa/assets/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	# Service Worker 与 manifest 绝不能长缓存：改了 sw.js 却拿不到新版，
+	# 是 PWA 最难排查的一类问题。
+	@nocache path /sw.js /manifest.webmanifest
+	header @nocache Cache-Control "no-cache"
+
+	# index.html 同理，必须每次回源，否则用户会看到旧的 SPA 外壳。
+	@shell path / /index.html
+	header @shell Cache-Control "no-cache"
+
+	# 健康检查不打日志，免得刷屏
+	@health path /healthz
+	log_skip @health
+}

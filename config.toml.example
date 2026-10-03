@@ -1,0 +1,125 @@
+# ============================================================================
+# ScheduleKit 唯一配置文件（模板）
+#
+# 这是全服务器**唯一**的配置来源。复制为 config.toml 后填写：
+#
+#   生产：/etc/schedulekit/config.toml   （属服务账号、权限 0600）
+#   开发：项目根目录 config.toml
+#
+# 读取顺序（只决定"读哪个文件"，不做多来源合并）：
+#   --config 参数 → SK_CONFIG 环境变量 → /etc/schedulekit/config.toml → ./config.toml
+#
+# 密钥可以用环境变量覆盖，便于"不把密钥写进文件"的部署方式：
+#   SK_SECRET_KEY / SK_PASSWORD_HASH / SK_LLM_API_KEY / SK_DUCKDNS_TOKEN
+#   （环境变量优先于本文件；空字符串不算覆盖）
+#
+# 控制台保存 [llm] 时会**就地改写本文件并保留以下全部注释**（tomlkit）。
+# ============================================================================
+
+[server]
+# 对外访问地址，用于生成确认页绝对链接等。必须与 Caddy 的对外地址一致。
+public_url  = "https://canisa1ph.duckdns.org"
+# 时区。同时作为 LLM 返回"无时区时间"时的解释基准。
+timezone    = "Asia/Shanghai"
+# uvicorn 仅监听回环，对外一律经 Caddy 反代。生产环境不要改成 0.0.0.0。
+listen_host = "127.0.0.1"
+listen_port = 8000
+# 数据目录。绝对路径直接使用；相对路径相对本配置文件所在目录解析。
+data_dir    = "data"
+# 单张图片上限与单个请求体上限（字节）
+max_image_bytes   = 8388608
+max_request_bytes = 12582912
+
+[auth]
+# 以下两项由 `python -m app.cli` 写入，不建议手改。
+# 管理员密码的 scrypt 哈希。用 `python -m app.cli set-password` 设置。
+password_hash    = ""
+# 会话 Cookie 与 CSRF 的签名根密钥。`python -m app.cli init` 会自动生成。
+# 为空时应用拒绝启动（fail-closed）。
+secret_key       = ""
+session_ttl_days = 30
+# 改密码时自增，可让所有既有会话立即失效（无状态 Cookie 的吊销手段）。
+session_epoch    = 1
+# 登录限流：窗口秒数内允许的失败次数
+login_window_seconds = 300
+login_max_attempts   = 10
+
+[term]
+# 第 1 周的周一（ISO 日期）。每学期手改一次，用于把"下周""第 8 周"换算成具体日期。
+start_date  = "2026-09-14"
+total_weeks = 16
+
+[llm]
+# provider 三选一：
+#   responses  -> {base_url}/responses         （OpenAI Responses 协议）
+#   chat       -> {base_url}/chat/completions  （OpenAI Chat 兼容协议）
+#   mock       -> 离线测试，不访问网络
+#
+# 结构化输出走"强制 function calling 为主、JSON 降级为辅"三通道编排，
+# 详见 app/llm/structured.py 与 docs/decisions.md。
+provider        = "responses"
+base_url        = "https://api.deepseek.com"
+model           = "deepseek-flash"
+api_key         = ""
+temperature     = 1.0
+timeout_seconds = 60
+# 精简输出的硬保险（Responses 里是 max_output_tokens，含思考 token）
+max_tokens      = 32000
+# thinking 开关。注意 DeepSeek 在 thinking 模式下**拒绝**强制/具名 tool_choice
+# （直接返回 400），开启后只能走 auto 或 JSON 通道。
+thinking         = false
+reasoning_effort = "high"
+# 临时性失败（连不上 / 超时 / 429 / 5xx）在放弃前的重试次数，不含首次尝试。
+# 401、400 这类确定性错误不重试。
+retry_count           = 3
+retry_backoff_seconds = 0.8
+# system prompt 保持静态（不含时间/课表/记忆），以维持 prompt 缓存有效性。
+# 时间上下文与记忆由服务端在每次请求时拼进 user message。
+system_prompt   = """
+你是一个任务抽取器。用户会给你一段文字和/或一张图片（可能是作业截图、群聊截图、成绩单、通知），你的唯一职责是把其中所有需要执行的事项抽出来，调用 submit_tasks 提交。
+
+只调用工具，不要输出任何解释性文字。
+
+字段规则：
+1. 有明确截止时间的事项：给出 due_at（ISO8601，带时区偏移），priority 必须为 null。
+2. 没有截止时间的事项：due_at 为 null，给出 priority 档位：
+   1 = Ⅰ 24 小时内必须处理 / 2 = Ⅱ 本周关键 / 3 = Ⅲ 常规 / 4 = Ⅳ 可延后 / 5 = Ⅴ 有空再说。
+   两者恰好有一个非空。
+3. title ≤ 20 字，不要重复时间、地点、课程名。与课业相关的尽量带上学科/课程名；无确凿证据就不要猜。
+4. notes ≤ 60 字，写对执行有影响的额外信息；没有就不输出该键。
+5. source_quote ≤ 20 字，填支撑该判定的原文片段。
+6. 同一事项被多次提及要合并成一条；最多提交 20 条。
+
+时间上下文使用规则（上下文在用户消息里）：
+- 只用来解析相对时间与课程指代（"下节课""这门课""明天"）。
+- 不得据此推断待识别内容的主语或归属；内容与课表无关时完全忽略上下文。
+- 内容里已含明确日期时一律以内容为准。
+- 上下文不得影响 priority 判定。
+
+记忆条目的使用规则：
+- 记忆是用户长期偏好或历史约定。只在它能帮助消歧时使用。
+- 不得把记忆里的内容当成待办事项本身提交。
+"""
+
+[ingest]
+# 未确认草稿的保留时长，到期由 housekeeping 清理。
+confirm_ttl_hours  = 48
+# 单次抽取最多接受多少条（超出截断并打点）
+max_items          = 20
+# 注入提示词的记忆总字符上限，防止记忆把上下文撑爆
+memory_char_budget = 2000
+
+[tls]
+# 仅部署脚本读取，应用本身不加载本段。
+provider      = "duckdns"                    # duckdns | manual
+domain        = "canisa1ph.duckdns.org"
+port          = 443
+acme_email    = ""
+duckdns_token = ""
+cert_dir      = "/etc/schedulekit-tls"
+
+[backup]
+enabled               = true
+hour                  = 4
+keep                  = 7
+upload_retention_days = 30
