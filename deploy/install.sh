@@ -158,39 +158,50 @@ fi
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
 # --------------------------------------------------------------------------- #
-# 5. 数据库与密码
+# 5. 数据库、签名密钥与密码
 #
-# ⚠️ `sudo -u user` **默认会重置环境变量**（env_reset），所以不能写成
-#    `SK_X=1 sudo -u user cmd`——变量根本传不进去。必须显式 `sudo env K=V ...`。
-#    第一次部署就是踩了这个：`set-password` 拿不到 SK_NEW_PASSWORD，
-#    报"没有拿到新密码"，而外层脚本因为管道/命令替换的关系看不出来。
+# 两个都必须显式处理的坑：
+#
+# ⚠️ 坑一：`sudo -u user` **默认会重置环境变量**（env_reset），所以不能写成
+#    `SK_X=1 sudo -u user cmd`——变量根本传不进去。必须 `sudo env K=V cmd`。
+#    第一次部署就踩了这个：`set-password` 拿到空的 SK_NEW_PASSWORD，
+#    报"没有拿到新密码"。
+#
+# ⚠️ 坑二：`sudo -u` 之后**工作目录不是项目目录**，于是 `python -m app.cli`
+#    找不到 `app` 包，报 `No module named 'app'`。必须显式 `cd` 进去。
+#    系统 systemd 单元里是靠 WorkingDirectory 解决的，这里得自己来。
 # --------------------------------------------------------------------------- #
-log "初始化数据库"
-# 以服务账号身份跑（数据目录属主是它），通过 env 显式传配置路径
-sudo -u "$SERVICE_USER" env "SK_CONFIG=$CONF_DIR/config.toml" \
-  "$INSTALL_DIR/.venv/bin/python" -m app.cli migrate
+run_cli() {
+  # 以服务账号身份、在项目目录里跑 app.cli，并显式传环境变量
+  local -a extra_env=()
+  while [[ "$1" == *=* ]]; do
+    extra_env+=("$1")
+    shift
+  done
+  sudo -u "$SERVICE_USER" env \
+    "SK_CONFIG=$CONF_DIR/config.toml" \
+    "${extra_env[@]}" \
+    bash -c "cd '$INSTALL_DIR' && exec ./.venv/bin/python -m app.cli $*"
+}
 
+log "初始化数据库与签名密钥"
 if [[ $INIT -eq 1 ]]; then
-  # 用 `python -m app.cli init` 而不是直接调 set-password：
-  # init 会**先补生成 auth.secret_key**（会话 Cookie 的签名根密钥），再设密码、建库。
-  # 少了 secret_key 的话应用会在启动期 fail-closed 退出——这是刻意的设计，
-  # 但部署脚本必须知道这件事，否则得到的是"服务起不来"而不是"配置有问题"。
+  # 用 `app.cli init` 而不是直接调 set-password：init 会**先补生成
+  # auth.secret_key**（会话 Cookie 的签名根密钥），再设密码、建库。
+  # 少了 secret_key 时应用会在启动期 fail-closed 退出——这是刻意的设计，
+  # 但部署脚本必须把生成它当成自己的一步，否则得到的是"服务起不来"。
   if [[ -z "${SK_NEW_PASSWORD:-}" ]]; then
     read -r -s -p "为管理员设置登录密码：" SK_NEW_PASSWORD
     echo
     [[ -n "$SK_NEW_PASSWORD" ]] || die "密码不能为空"
     export SK_NEW_PASSWORD
   fi
-  sudo -u "$SERVICE_USER" env \
-    "SK_CONFIG=$CONF_DIR/config.toml" \
-    "SK_NEW_PASSWORD=$SK_NEW_PASSWORD" \
-    "$INSTALL_DIR/.venv/bin/python" -m app.cli init
+  run_cli "SK_NEW_PASSWORD=$SK_NEW_PASSWORD" init
   unset SK_NEW_PASSWORD
 else
-  # 非首次也跑一次 init：它会幂等地补上缺失的 secret_key（例如从旧配置升级），
-  # 而不带 SK_NEW_PASSWORD 时不会动已有密码。
-  sudo -u "$SERVICE_USER" env "SK_CONFIG=$CONF_DIR/config.toml" \
-    "$INSTALL_DIR/.venv/bin/python" -m app.cli init --no-password
+  # 非首次也跑一次：幂等地补上缺失的 secret_key（例如从没有密钥的旧配置升级），
+  # 而 --no-password 保证不会动已有密码。
+  run_cli init --no-password
 fi
 
 # --------------------------------------------------------------------------- #
@@ -199,8 +210,10 @@ fi
 # 以 root 读：root 一定能读 0600 的配置，不需要冒"环境变量没传进去"的风险。
 # --------------------------------------------------------------------------- #
 log "读取配置"
-CFG_JSON="$(SK_CONFIG="$CONF_DIR/config.toml" \
-  "$INSTALL_DIR/.venv/bin/python" -m app.cli show --json --secrets)"
+# root 直接读：root 一定能读 0600 的配置，不需要冒"环境变量没传进去"的风险。
+# 同样要 cd 进项目目录，否则 `-m app.cli` 找不到包。
+CFG_JSON="$(cd "$INSTALL_DIR" && SK_CONFIG="$CONF_DIR/config.toml" \
+  ./.venv/bin/python -m app.cli show --json --secrets)"
 
 # 从配置 JSON 里按"点分路径"取值，例如 `jget tls.domain`。
 #
@@ -436,7 +449,7 @@ echo "  服务已启动"
 # 11. 自检
 # --------------------------------------------------------------------------- #
 log "自检"
-SK_CONFIG="$CONF_DIR/config.toml" "$INSTALL_DIR/.venv/bin/python" -m app.cli --pretty check \
+(cd "$INSTALL_DIR" && SK_CONFIG="$CONF_DIR/config.toml" ./.venv/bin/python -m app.cli --pretty check) \
   || warn "配置自检有告警（见上）"
 
 echo "  本机回环探测："
