@@ -453,10 +453,21 @@ log "自检"
   || warn "配置自检有告警（见上）"
 
 echo "  本机回环探测："
-if curl -fsS --max-time 10 "http://127.0.0.1:${LISTEN_PORT}/healthz" >/dev/null 2>&1; then
+# 轮询而不是立刻探一次：服务刚 restart，uvicorn 需要一点时间才 bind。
+# 立刻探会得到"连接被拒"这种**假失败**，而假失败比没有检查更糟——
+# 它会训练人忽略自检输出。
+ready=0
+for _ in $(seq 1 20); do
+  if curl -fsS --max-time 3 "http://127.0.0.1:${LISTEN_PORT}/healthz" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.5
+done
+if [[ $ready -eq 1 ]]; then
   echo "    http  健康检查 OK（127.0.0.1:${LISTEN_PORT}）"
 else
-  warn "    http  健康检查失败，最近日志："
+  warn "    http  健康检查失败（已等待 10 秒），最近日志："
   journalctl -u schedulekit -n 15 --no-pager || true
 fi
 if curl -fsS --max-time 12 --resolve "${DOMAIN}:${SITE_PORT}:127.0.0.1" \
