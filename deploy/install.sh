@@ -171,6 +171,10 @@ sudo -u "$SERVICE_USER" env "SK_CONFIG=$CONF_DIR/config.toml" \
   "$INSTALL_DIR/.venv/bin/python" -m app.cli migrate
 
 if [[ $INIT -eq 1 ]]; then
+  # 用 `python -m app.cli init` 而不是直接调 set-password：
+  # init 会**先补生成 auth.secret_key**（会话 Cookie 的签名根密钥），再设密码、建库。
+  # 少了 secret_key 的话应用会在启动期 fail-closed 退出——这是刻意的设计，
+  # 但部署脚本必须知道这件事，否则得到的是"服务起不来"而不是"配置有问题"。
   if [[ -z "${SK_NEW_PASSWORD:-}" ]]; then
     read -r -s -p "为管理员设置登录密码：" SK_NEW_PASSWORD
     echo
@@ -180,8 +184,13 @@ if [[ $INIT -eq 1 ]]; then
   sudo -u "$SERVICE_USER" env \
     "SK_CONFIG=$CONF_DIR/config.toml" \
     "SK_NEW_PASSWORD=$SK_NEW_PASSWORD" \
-    "$INSTALL_DIR/.venv/bin/python" -m app.cli set-password
+    "$INSTALL_DIR/.venv/bin/python" -m app.cli init
   unset SK_NEW_PASSWORD
+else
+  # 非首次也跑一次 init：它会幂等地补上缺失的 secret_key（例如从旧配置升级），
+  # 而不带 SK_NEW_PASSWORD 时不会动已有密码。
+  sudo -u "$SERVICE_USER" env "SK_CONFIG=$CONF_DIR/config.toml" \
+    "$INSTALL_DIR/.venv/bin/python" -m app.cli init --no-password
 fi
 
 # --------------------------------------------------------------------------- #
@@ -427,16 +436,17 @@ echo "  服务已启动"
 # 11. 自检
 # --------------------------------------------------------------------------- #
 log "自检"
-SK_CONFIG="$CONF_DIR/config.toml" "$INSTALL_DIR/.venv/bin/python" -m app.cli check --pretty \
+SK_CONFIG="$CONF_DIR/config.toml" "$INSTALL_DIR/.venv/bin/python" -m app.cli --pretty check \
   || warn "配置自检有告警（见上）"
 
 echo "  本机回环探测："
-if curl -fsS --max-time 8 "http://127.0.0.1:${UPSTREAM##*:}/healthz" >/dev/null 2>&1; then
-  echo "    http  健康检查 OK"
+if curl -fsS --max-time 10 "http://127.0.0.1:${LISTEN_PORT}/healthz" >/dev/null 2>&1; then
+  echo "    http  健康检查 OK（127.0.0.1:${LISTEN_PORT}）"
 else
-  warn "    http  健康检查失败（应用可能刚起，稍等再试）"
+  warn "    http  健康检查失败，最近日志："
+  journalctl -u schedulekit -n 15 --no-pager || true
 fi
-if curl -fsS --max-time 10 --resolve "${DOMAIN}:${SITE_PORT}:127.0.0.1" \
+if curl -fsS --max-time 12 --resolve "${DOMAIN}:${SITE_PORT}:127.0.0.1" \
      "https://${DOMAIN}:${SITE_PORT}/healthz" >/dev/null 2>&1; then
   echo "    https 反代 OK（${DOMAIN}:${SITE_PORT}）"
 else
