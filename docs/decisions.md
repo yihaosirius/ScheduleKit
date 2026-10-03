@@ -99,3 +99,56 @@
   - 让 Caddy 自动 ACME(HTTP-01) —— 需要 80 入站与备案条件，而 DNS-01 走 acme.sh 已经跑通。
 - **影响**：`systemctl reload caddy` 不可用（Caddyfile 里 `admin off`），改配置后
   必须 `systemctl restart caddy`。
+
+## D-008 Cookie 会话识别 Web UI，API Key 识别快捷指令/小组件；两者不叠加
+
+- **状态**：采纳（2026-10-03）
+- **背景**：浏览器要"一次登录长期有效"，快捷指令要"无交互可重复调用"，两者对凭据的要求相反。
+- **决策**：两条互斥的凭据路径。Cookie 会话 = 签名 Cookie（`HttpOnly` + `SameSite=Lax`，
+  HTTPS 下加 `Secure`）+ 写操作强制 `X-CSRF-Token`；API Key = `Authorization: Bearer sk_...`，
+  **不做 CSRF 校验**，只读/可写由 `scope` 决定。会话吊销靠 `session_epoch` 自增。
+- **理由**：CSRF 攻击的前提是浏览器会自动携带凭据；`Authorization` 头不会被自动携带，
+  给 API Key 加 CSRF 只会让快捷指令无法工作。
+- **被否决**：
+  - 服务端 session 表 —— 单用户单机场景下，为"能踢会话"引入一张表与清理任务不划算。
+  - 让签名覆盖负载但不覆盖 `epoch` —— 那样把 epoch 改大就能绕过"改密码踢会话"。
+  - 朴素双提交 CSRF（Cookie 值 == 表单值）—— 能写 Cookie 的攻击者可两边写成同一值。
+  - 给 API Key 也上 CSRF —— 快捷指令传不了（也不该传）CSRF token。
+- **影响**：`app/deps.py` 的 `require_csrf` 按 `principal.kind` 分支；
+  测试必须覆盖"API Key 请求无 CSRF 也能写"与"Cookie 请求无 CSRF 被拒"两侧。
+
+## D-009 结构化输出走「强制 function calling 为主、JSON 降级为辅」三通道
+
+- **状态**：采纳（2026-10-03）
+- **背景**：设计以「不可信思想」为前提，首选 tool use；但 DeepSeek 现行文档明确：
+  **thinking 模式下 `tool_choice` 为 `required` 或具名工具会返回 400**，
+  且"模型没产出 function call"是无法事前探测的真实失败模式。
+- **决策**：三通道按序尝试，逐级降级且**降级必须响亮**（落库 `llm_path` + WARNING 日志 +
+  确认页标记）：
+  1. 强制 function calling（`thinking` 关闭 + 具名 `tool_choice` + `strict: true`）
+  2. JSON 结构化输出（responses 用 `text.format=json_schema`，chat 用 `response_format=json_object`）
+  3. thinking 开启 + `tool_choice: auto`
+- **理由**：主通道拿到的是**约束解码**结果，格式漂移最小；降级通道保证"供应商行为变化"
+  不会让功能整体不可用；而把降级做成可观测事件，用户才知道这一次的结果可不可信。
+- **被否决**：
+  - 只做 tool call，失败即报错 —— 供应商侧的策略变化会直接让功能不可用。
+  - 静默降级到"解析模型自由文本" —— 那是最难排查的一类失败，也违背不可信前提。
+  - 只用 JSON mode —— 放弃 `strict` 的工具参数校验，格式漂移要靠后处理兜，成本更高。
+- **影响**：`llm_path` 是 `ingest_drafts` 的列；`app/llm/structured.py` 负责编排，
+  `app/llm/tools.py` 是三套请求形状的唯一真相。
+
+## D-010 旧实例「彻底清空」，但先做一次不可逆前的归档
+
+- **状态**：采纳（2026-10-03）
+- **背景**：用户明确选择"彻底清空，从零开始"，而服务器上跑的正是上一版 ScheduleKit，
+  库里已有 33 条真实任务、11 门课、13 张上传图片。
+- **决策**：执行拆除，但 `deploy/legacy-teardown.sh` 强制先归档到
+  `/root/legacy-schedulekit/`（可读 SQL dump + 原始 db + 上传图片 tar + 旧配置 + 旧设计文档），
+  并支持 `--archive-only` 两段式执行。
+- **理由**：归档成本 37MB，误删成本不可逆。"从零开始"针对的是代码与部署，
+  不必然包含数据；把不可逆操作与可逆操作分开，是最基本的风险控制。
+- **被否决**：
+  - 不归档直接删 —— 一旦发现"某条任务还得要"就没有退路。
+  - 新旧共存、验证后再切 —— 用户已明确排除，且会长期多占内存（服务器仅 1.6G）。
+  - 自动恢复旧数据 —— 与"从零开始"冲突；归档只作保险，恢复是人工决定的事。
+- **影响**：`/root/legacy-schedulekit/` 需长期保留；`docs/deploy.md` 记录其位置与内容清单。
