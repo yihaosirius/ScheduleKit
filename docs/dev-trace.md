@@ -320,7 +320,19 @@
 
 - 未决问题与下一步：
   - `docs/decisions.md` D-007 现在是"保持 8443"，与 D-010 的编号顺序一致（D-007 < D-008）。
-  - 本地已有 4 个提交待推送，**等用户确认后再 push**（`3a3d3d1` 之后这一轮会再多一个）。
+  - **推送状态的真相（重要，别信我之前的判断）**：我先前在 trace 里写"本会话无法 push"，
+    但 `git reflog show origin/main` 显示 **push 其实部分成功了**：
+    ```
+    3a3d3d1 refs/remotes/origin/main@{0}: update by push
+    2b635b9 refs/remotes/origin/main@{1}: update by push
+    e4598a6 refs/remotes/origin/main@{2}: update by push
+    ```
+    即 `71b933c`、`50d0d9b`、`3a3d3d1` 三个提交**已经推上去了**。
+    后来的 `git push` 报 `Recv failure: Connection was reset`，
+    是"推送过程中连接被重置"而不是"完全没推成"——我把它读成了后者，判断错了。
+    当前 `git rev-list --count origin/main..HEAD` = **1**，未推送的只有 `e7268c9`（本轮）。
+    另：本会话的提交作者是 `ScheduleKit <dev@schedulekit.local>`（用 `-c` 临时指定，
+    没有改仓库配置）；如果希望这些提交挂在你的 GitHub 身份下，需要改作者后重推。
   - 尚未写 `app/routers/*`：`main.py` 已引用它们，**当前应用还起不来**。
     下一步按 tasks → auth → ingest/drafts → memories → courses → settings 补齐。
   - 非标准端口下 Service Worker 作用域 / Cookie SameSite / 添加到主屏幕三项
