@@ -552,3 +552,120 @@
   - 真机验收清单（PWA 可安装性、非标准端口下的 Service Worker 作用域、
     Cookie SameSite、添加到主屏幕）必须在部署到 8443 之后做。
 
+---
+
+## 2026-10-03 19:30 · 上线：8443 真机部署完成，端到端从公网验证通过
+
+- 目标：把服务端真正部署到 `https://canisa1ph.duckdns.org:8443` 并让它在公网上
+  可用。用户给了 DuckDNS token，LLM 先保持 `mock`。
+
+- 决策与理由：
+  - **先部署再写前端**。理由是"真机能跑"与"本地测试全绿"是两件事（上一条 trace
+    已经证明了），越早让真机跑起来，越早暴露只有真机才会有的问题。
+    - 被否决：先把前端做完再一起部署。否决原因是那会把所有真机风险堆到最后，
+      而且前端本身也需要真机来验证 PWA 相关行为。
+  - **部署脚本只接管 marker 之间的站点块**，不动 Caddyfile 的其余部分。
+    - 理由：这台机器上 Caddy 还托管着别人的服务（cloudreve WebDAV 在 :8079），
+      一次全量覆盖会让它们一起挂。
+    - 被否决：让脚本生成整份 Caddyfile。否决原因是服务器上已经有全局块
+      （`admin off` / `log`），而 Caddyfile **只允许一个全局块**，
+      插第二个会直接 validate 失败。
+  - **token 与密码通过环境变量注入脚本**，不进仓库、不硬编码。
+    - 被否决：把 token 写进 `deploy/` 下的某个文件。否决原因是上一版就是这么做的，
+      结果 token 随脚本进了 git 仓库。
+  - **端到端验证脚本用 Node 从本地机器走公网**，而不是在服务器上 curl。
+    - 理由：那才是用户的真实访问路径（手机也走这条路）；在服务器上自测只能证明
+      回环可用。
+
+- 触及文件：
+  - 新增：`deploy/install.sh`、`deploy/schedulekit.service`、`deploy/Caddyfile.template`
+  - 新增：`docs/deploy.md`、`docs/api.md`、`docs/shortcuts.md`、`docs/widget.md`、
+    `docs/push-notes.md`
+  - 新增：`clients/scriptable/schedulekit-widget.js`
+  - 新增：`tests/test_docs.py`、`tests/test_serve.py`
+  - 新增：`.gitattributes`（强制 LF）
+  - 新增（gitignore 内，不入库）：`.pytest-run/verify-deploy.mjs`、`.pytest-run/e2e.mjs`
+  - 修改：`app/serve.py`、`app/llm/structured.py`、`tests/test_llm_channels.py`、
+    `tests/_support.py`、`tests/conftest.py`、`tests/test_config.py`、`README.md`
+  - 服务器：`/opt/schedulekit`、`/etc/schedulekit/config.toml`、`/var/lib/schedulekit`、
+    `/etc/systemd/system/schedulekit{,-duckdns}.{service,timer}`
+  - 服务器保留：`/root/schedulekit-credentials.txt`（0600，管理员密码）
+
+- 执行过的命令与结果：
+  - 首字部署**失败两次**，都是真机才暴露的问题：
+    1. `SK_NEW_PASSWORD=... sudo -u schedulekit ... set-password` 报
+       `配置错误：没有拿到新密码`。根因：`sudo -u` 默认 `env_reset`，
+       前缀赋值的环境变量传不进去。实测验证：
+       `sudo -u nobody env | grep -c PROBE_VAR` → `0`。
+       改成 `sudo -u USER env K=V ...`。
+    2. 改完仍起不来，日志：
+       ```
+       app.config.ConfigError: 配置校验失败：
+         - auth.secret_key 为空：会话 Cookie 无法签名。运行 `python -m app.cli init` 生成
+       Application startup failed. Exiting.
+       ```
+       根因：脚本只调了 `migrate` + `set-password`，**从没生成 `secret_key`**。
+       fail-closed 的行为是对的，错在部署脚本没把它当成自己的一步。
+       改为走 `app.cli init`（非首次则 `init --no-password` 幂等补上）。
+    3. 顺带修掉：`sudo -u` 之后 CWD 不是项目目录，`python -m app.cli` 报
+       `No module named 'app'`，新增 `run_cli()` 包装显式 `cd`。
+    4. 自检里 `--pretty` 被放到子命令之后，argparse 报 `unrecognized arguments`
+       （全局选项必须在子命令之前）。
+    5. `jq_get` 用 `python3 -c "…eval('d'+'$1')…"` 拼字符串，引号在
+       shell→python 传递中掉了一层，报 `SyntaxError: invalid syntax.
+       Perhaps you forgot a comma?`。改成把路径当参数传给固定脚本。
+  - 部署成功后从**本地机器**跑 `.pytest-run/verify-deploy.mjs`（走公网到 8443）：
+    第二轮 **11/11 通过**。
+    ```
+    PASS  部署的 /healthz 可访问
+    PASS  用凭据登录成功
+    PASS  拍照/文字录入生成草稿（provider=mock）— item_count=1
+    PASS  解析出了条目 — due_at=2026-10-10T15:59:00+00:00
+    PASS  确认入库 / 有截止时间的进有序表
+    PASS  状态接口可用 — week=3
+    PASS  上下文注入正常 / PWA manifest 可访问
+    ```
+  - 幂等重部署两次（带 `--init` / 不带）都成功；最终自检：
+    `ok: true, problems: []`，`http 健康检查 OK`、`https 反代 OK`。
+  - 清空验证残留后确认空库：`items/drafts/memories/courses` 全为 0。
+  - `uv run pytest -q -p no:cacheprovider` → 退出码 0：`436 passed, 1 skipped`。
+
+- 观察到的现象 / 反直觉之处 / 踩坑：
+  - **反直觉（重要）**：写 `tests/test_docs.py` 时我遍历 `app.routes` 只看到
+    `/healthz`，第一反应是"路由怎么全丢了"。写探针一查才发现：
+    **Starlette 1.7 起 `include_router` 的结果是一个 `_IncludedRouter` 包装对象，
+    子路由不再摊平进 `app.routes`**，挂载前缀在 `include_context.prefix` 里。
+    而发请求验证显示所有接口其实**全都正常**（`/api/tasks` 返回 401、
+    `/api/does-not-exist` 返回 404，都对）。
+    **教训：判断"端点存不存在"的权威方法是发请求，不是枚举内部结构。**
+    测试里因此加了一条"枚举结果不能少于 20 条"的前置断言——否则哪天枚举方式再失效，
+    下面两条"文档与代码对齐"的测试会因为枚举到空集而**假装通过**。
+  - **反直觉**：`sudo -u` 重置环境变量这件事，在交互式终端里几乎不会遇到
+    （因为大家习惯 `sudo -E` 或者直接从 root 跑）。它在"脚本里 `VAR=x sudo -u u cmd`"
+    这个写法下才出现，而且**外层脚本因为命令替换的关系看不出失败**——
+    第一次部署时脚本继续往下跑了。
+  - **反直觉**：`git archive` **只打包已提交的内容**。第一次打包时
+    `deploy/install.sh` 刚创建还没提交，于是服务器上解出来的 `deploy/` 是空的，
+    报 `ls: cannot access .../install.sh: No such file or directory`。
+    在"打包=发布"的流程里，这个特性其实是对的（保证发布的是提交过的代码），
+    但必须先 commit 再 archive。
+  - 自检第一次报 `http 健康检查失败` 却又报 `https 反代 OK`——看着自相矛盾。
+    实际是**探测与 `systemctl restart` 之间没有等待**：http 探测打在 uvicorn
+    bind 之前（连接被拒），而 https 探测在几秒后（已经起来了）。
+    改成轮询最多等 10 秒。**假失败比没有检查更糟**：它会训练人忽略自检输出。
+  - 第二次端到端跑出 `FAIL 草稿阶段任务表为空 — {"ordered":1,...}`。
+    查库确认那是**上一次验证运行自己留下的任务**（created_at 11:22:17 与 11:29:32
+    正好对应两次运行），不是零写入不变量被破坏。
+    端到端脚本必须从干净库开始，否则它测的是上一轮的残留。
+
+- 未决问题与下一步：
+  - **前端 SPA 仍未写**：`GET /` 现在返回 503 的"前端尚未构建"说明页。
+    这是剩下的最大一块（双列表 UI / 交互动画 / PWA / 确认页 / 设置 / 状态 / 课表 / 记忆）。
+  - **LLM 仍是 `mock`**：按用户要求先在离线确定性模式下跑通链路。
+    填真实 Key 的两种方式见 `docs/deploy.md`。
+  - **真机验收清单**（PWA 可安装性、非标准端口的 Service Worker 作用域、
+    Cookie SameSite、添加到主屏幕）现在**可以做**了——服务已在公网可用，
+    但前端的 Service Worker 文件还没写，所以这几项要等前端。
+  - 管理员密码在服务器 `/root/schedulekit-credentials.txt`；建议登录后立刻改。
+  - 本地提交待用户推送（本会话的推送一律交给用户执行）。
+
