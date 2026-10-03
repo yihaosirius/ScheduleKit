@@ -224,6 +224,36 @@ def test_done_toggle_updates_counts_locally() -> None:
     assert "refreshCounts" in text
 
 
+def test_done_card_shows_absolute_time_not_countdown() -> None:
+    """已完成的任务只显示绝对时间，不显示"几小时后 / 逾期"这类倒计时。
+
+    用户明确提过这一点：已经做完的事没有再显示时间压力的道理，
+    红色逾期标记和倒计时只会干扰阅读。同时显示「21 小时前」+「10月2日 23:59」
+    也是同一份信息的两次表达。
+
+    另外已完成时显示的是**完成时间**而不是原截止时间——对一个做完的事，
+    更相关的是"什么时候做完的"；当两者相差很大时（提前一周做完），
+    只显示截止时间会让人误以为它早该交了。
+    """
+    text = (SRC / "components" / "TaskCard.vue").read_text(encoding="utf-8")
+
+    # 倒计时只在"有序表且未完成"时出现
+    assert "isOrdered && !isDone" in text, "倒计时要排除已完成的任务"
+    assert "due_in_human" in text, "未完成的有序任务仍要显示倒计时"
+
+    # 已完成走完成时间分支
+    assert "completed_at" in text
+    assert "完成于" in text, "已完成任务的时间要标成完成时间"
+
+    # 已完成不再显示优先级档位
+    assert "!isDone" in text
+
+    # 不再需要冗余的"已完成"文字 chip（绿色对勾已经表达了）
+    assert 'class="sk-chip sk-chip--ok">已完成' not in text, (
+        "已完成条目不需要额外的文字标签，绿色对勾已经足够"
+    )
+
+
 def test_priority_labels_match_backend() -> None:
     """优先级文案必须与后端 system prompt 里的说明一致。"""
     client = (SRC / "api" / "client.ts").read_text(encoding="utf-8")

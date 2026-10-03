@@ -34,6 +34,24 @@ const hasNotes = computed(() => props.task.notes.trim().length > 0)
 /** 需求里的"二选一"决定了卡片显示哪一种主信息 */
 const isOrdered = computed(() => props.task.due_at !== null)
 
+const isDone = computed(() => props.task.status === 'done')
+
+/**
+ * 卡片上显示的那个绝对时间。
+ *
+ * 已完成时显示**完成时间**而不是原截止时间：对一个已经做完的事，
+ * 更相关的是"什么时候做完的"。如果两者相差很大（比如提前一周做完），
+ * 光看截止时间会误以为它早就该交了。
+ */
+const displayTime = computed(() => {
+  if (isDone.value) {
+    return props.task.completed_at
+      ? `完成于 ${formatDateTime(props.task.completed_at)}`
+      : null
+  }
+  return props.task.due_at ? `截止 ${formatDateTime(props.task.due_at)}` : null
+})
+
 async function onToggle(): Promise<void> {
   if (completing.value) return
   completing.value = true
@@ -72,25 +90,30 @@ async function onToggle(): Promise<void> {
         <div class="task__meta">
           <span class="sk-chip">{{ categoryLabel(task.category) }}</span>
 
-          <!-- 有序表：显示截止时间与倒计时。倒计时来自服务端，不自己算 -->
-          <template v-if="isOrdered">
+          <!-- 有序表且**未完成**：显示倒计时（来自服务端，不自己算）。
+               已完成的任务刻意不显示它 —— 见下面 done_at 的注释。 -->
+          <template v-if="isOrdered && !isDone">
             <span class="task__due" :class="`task__due--${state}`">
               {{ task.due_in_human }}
             </span>
           </template>
 
-          <!-- 无序表：显示优先级档位 -->
-          <template v-else>
+          <!-- 无序表且**未完成**：显示优先级档位 -->
+          <template v-else-if="!isDone">
             <span class="task__priority" :data-p="task.priority">
               {{ priorityLabel(task.priority) }}
             </span>
           </template>
-
-          <span v-if="task.status === 'done'" class="sk-chip sk-chip--ok">已完成</span>
+          <!-- 已完成的条目不再显示优先级："Ⅴ 有空再说"对一个做完的事没有意义 -->
         </div>
       </div>
 
-      <div v-if="isOrdered" class="task__when">{{ formatDateTime(task.due_at) }}</div>
+      <!-- 时间标注：未完成显示截止时间，已完成显示**完成时间**。
+           两者都只用绝对时间，不显示"几小时后 / 逾期"这类倒计时 ——
+           已完成的任务没有时间压力，红色逾期标记与倒计时只会干扰阅读。 -->
+      <div v-if="displayTime" class="task__when" :class="{ 'task__when--done': isDone }">
+        {{ displayTime }}
+      </div>
 
       <button
         v-if="hasNotes"
@@ -296,6 +319,12 @@ async function onToggle(): Promise<void> {
   font-size: 11px;
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
+}
+
+/* 已完成条目上的时间再淡一档：它是"记录"，不是"待办"。
+   与标题的删除线一起，让整行明确读作"已经过去了"。 */
+.task__when--done {
+  opacity: 0.72;
 }
 
 .task__notes-toggle {
