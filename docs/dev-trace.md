@@ -233,6 +233,12 @@
 
 - 未决问题与下一步：
   - `443` 仍等 Aliyun 安全组放行；这是唯一的外部阻塞项。
+  - **本会话无法 `git push`**：`git push origin main` → 退出码 1，
+    `fatal: unable to access 'https://github.com/yihaosirius/ScheduleKit.git/':
+    Failed to connect to github.com:443 after 21049 ms: Could not connect to server`。
+    本会话的 schannel 出网对 github.com 不可用（旧项目 dev-notes 里记录过同一个坑：
+    curl/git/PowerShell 走 schannel 都不通，只有 Node 与 uv 自带 TLS 才能出网）。
+    提交只落在本地，需要用户在能访问 GitHub 的环境执行 `git push`。
   - 尚未写 `app/routers/*`：`main.py` 里已经引用它们，所以**当前应用还起不来**。
     下一步按 tasks → auth → ingest/drafts → memories → courses → settings 的顺序补齐。
   - 草稿（`ingest_drafts`）与记忆（`memories`）的服务层尚未实现；
