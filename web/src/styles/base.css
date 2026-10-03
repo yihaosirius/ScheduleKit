@@ -1,0 +1,307 @@
+/* ============================================================================
+ * ScheduleKit 设计系统
+ *
+ * 三条原则，都不是装饰性的：
+ *
+ * 1. **移动优先，PC 不被牺牲**。基础样式按手机写，PC 端通过一个断点
+ *    把"底部 dock"变成"右侧常驻侧栏"。不是两套 UI，是同一套布局的两个方向。
+ *
+ * 2. **深浅色用同一组语义变量**，不在组件里写死颜色。否则加一个页面就要
+ *    重新想一遍深色模式。
+ *
+ * 3. **动效统一时长与缓动**。零散写 transition 的结果是每个元素都有自己的
+ *    节奏，整体看起来"散"。这里把时长与曲线集中定义，组件只用变量。
+ * ========================================================================== */
+
+:root {
+  /* ── 语义色（浅色）──────────────────────────────────────────── */
+  --bg: #f5f5f7;
+  --bg-elevated: #ffffff;
+  --bg-sunken: #ebebef;
+  --text: #1c1e21;
+  --text-secondary: #5a5f66;
+  --text-tertiary: #8a9099;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --accent: #1c1e21;
+  --accent-soft: rgba(28, 30, 33, 0.06);
+
+  /* 状态色：用饱和度低一点的版本，避免整屏都在喊 */
+  --danger: #d64545;
+  --danger-soft: rgba(214, 69, 69, 0.1);
+  --warn: #d98324;
+  --warn-soft: rgba(217, 131, 36, 0.12);
+  --ok: #3f9142;
+  --ok-soft: rgba(63, 145, 66, 0.1);
+  --info: #3b7dd8;
+  --info-soft: rgba(59, 125, 216, 0.1);
+
+  /* ── 尺寸与间距 ─────────────────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow: 0 2px 10px rgba(0, 0, 0, 0.07);
+  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.16);
+
+  /* 安全区：iPhone 刘海/底部横条。做成变量，组件里不重复写 env() */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  --header-h: 52px;
+  --dock-h: 58px;
+  --sidebar-w: 232px;
+
+  /* ── 动效 ───────────────────────────────────────────────────── */
+  /* 一条曲线贯穿全局：起步快、收尾慢，是"原生 App"的手感来源 */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 130ms;
+  --dur: 200ms;
+  --dur-slow: 320ms;
+}
+
+:root[data-theme='dark'] {
+  --bg: #131417;
+  --bg-elevated: #1c1e21;
+  --bg-sunken: #0e0f11;
+  --text: #e8eaed;
+  --text-secondary: #a2a8b0;
+  --text-tertiary: #767c85;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --accent: #e8eaed;
+  --accent-soft: rgba(255, 255, 255, 0.07);
+
+  --danger: #ff6b6b;
+  --danger-soft: rgba(255, 107, 107, 0.14);
+  --warn: #f0a24a;
+  --warn-soft: rgba(240, 162, 74, 0.15);
+  --ok: #5cbf60;
+  --ok-soft: rgba(92, 191, 96, 0.14);
+  --info: #6ba4f0;
+  --info-soft: rgba(107, 164, 240, 0.15);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.55);
+}
+
+/* ── 基础 ────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  /* 移动端点击高亮会让人以为"点中了两个东西" */
+  -webkit-tap-highlight-color: transparent;
+  /* 顶部下拉刷新与底部橡皮筋在 App 式布局里是干扰 */
+  overscroll-behavior-y: none;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* 尊重系统的"减弱动态效果"。这不是可选项：
+   前庭功能障碍的用户会因为位移动画不适。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── 通用小工具类 ────────────────────────────────────────────── */
+.sk-card {
+  background: var(--bg-elevated);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--border);
+}
+
+.sk-muted {
+  color: var(--text-secondary);
+}
+
+.sk-dim {
+  color: var(--text-tertiary);
+}
+
+.sk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--accent-soft);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.sk-chip--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.sk-chip--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.sk-chip--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.sk-chip--info {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.sk-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--bg-elevated);
+  font-weight: 600;
+  font-size: 14px;
+  transition: transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+
+.sk-btn:active {
+  transform: scale(0.97);
+}
+
+.sk-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sk-btn--ghost {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.sk-btn--danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.sk-btn--block {
+  width: 100%;
+}
+
+.sk-input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.sk-input:focus {
+  outline: none;
+  border-color: var(--text-secondary);
+}
+
+.sk-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 5px;
+}
+
+.sk-field {
+  margin-bottom: 14px;
+}
+
+/* 滚动条：只在桌面端显示，且细一点 */
+@media (hover: hover) and (pointer: fine) {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* ── 过渡：列表项的进出场 ─────────────────────────────────────── */
+/* 用 FLIP 的思路做：进入时从下方轻微上移 + 淡入，离开时淡出 + 收高。
+   收高（max-height）而不是直接 display:none，才不会让下面的内容瞬间跳上来。 */
+.list-move,
+.list-enter-active,
+.list-leave-active {
+  transition: transform var(--dur) var(--ease), opacity var(--dur) var(--ease);
+}
+
+.list-enter-from {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+}
+
+.list-leave-to {
+  opacity: 0;
+  transform: translateX(24px) scale(0.96);
+}
+
+/* 离开的元素脱离文档流，其余元素才能平滑补位 */
+.list-leave-active {
+  position: absolute;
+  width: 100%;
+}

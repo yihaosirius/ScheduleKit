@@ -669,3 +669,124 @@
   - 管理员密码在服务器 `/root/schedulekit-credentials.txt`；建议登录后立刻改。
   - 本地提交待用户推送（本会话的推送一律交给用户执行）。
 
+---
+
+## 2026-10-03 19:45 · SPA 前端：双列表 / 动画 / PWA / 确认页 / 设置 / 状态 / 课表 / 记忆
+
+- 目标：把服务端已经打通的链路变成**能看能点**的界面。用户要求"写前端记得用
+  browser 自己检查"。
+
+- 决策与理由：
+  - **不引 UI 组件库（Vant / Element Plus）**。用 Vue 3 + 手写组件 + 一套
+    CSS 设计系统。
+    - 理由：需求要的是"类 Flutter"的**交互动效**（滑动指示器、勾选划掉、
+    列表 FLIP、抽屉滑入），而组件库的动画是它自己那套节奏，要覆盖它反而更费事。
+    手写让动效曲线与时长完全统一（`:root` 里的 `--ease` / `--dur-*`）。
+    - 被否决：Vant 4（移动端组件全）。否决原因是它自带的过渡与我们的设计语言冲突，
+    且会显著增大包体（我们的产物 gzip 后只有 ~68KB）。
+  - **不引 Pinia**。用 `reactive` 对象 + 几个函数（`web/src/state/store.ts`）。
+    - 理由：共享状态只有三块（会话、任务、设置），多一个依赖要多一套心智模型。
+  - **不做乐观更新**。所有改动先发请求，成功后再用响应更新本地。
+    - 理由：乐观更新在失败时要回滚，回滚代码比它省下的 100ms 值钱；
+    这个应用也不追求那个级别的响应速度。
+    - 被否决：乐观更新 + 失败回滚。否决原因是"回滚错了"会产生比慢 100ms
+    严重得多的问题（显示已删除但其实还在）。
+  - **用 hash 路由**（`createWebHashHistory`）。
+    - 理由见 `web/src/router.ts` 的注释：服务端生成的 `confirm_url` 就是
+    `/#/drafts/{id}`（快捷指令要在手机上直接打开它）；而且 history 路由要求
+    服务端把所有未知路径回退到 index.html，那个回退一旦把 `/api/*` 也吃掉，
+    接口 404 会变成"返回了 HTML"，前端报的错会指向无关的地方。
+    - 被否决：history 路由 + SPA 回退。
+  - **构建产物提交入库**。服务器不装 Node。
+    - 被否决：服务器上构建。否决原因是那要引入 Node + pnpm 与构建环境，
+    而服务器只有 1.6G 内存且跑着别的服务。
+  - **二选一约束在界面里做成"模式切换"而不是两个输入框 + 报错**。
+    - 理由：用户不需要理解"为什么不能都填"，因为界面没给他这个机会。
+    这比填完再被打回友好得多。
+  - **Service Worker 放在 `app/static/sw.js`（后端托管）而不是 Vite 的 public 目录**。
+    - 理由：后端能给它精确的 `Content-Type` 与 `Cache-Control: no-cache`
+    以及 `Service-Worker-Allowed`。交给静态托管按扩展名猜不如显式写死。
+  - **PWA 图标用脚本现生成**（`scripts/make_icons.py`）。
+    - 理由：旧项目的图标没进归档（当时只归档了数据库与上传图片），
+    而现生成比去找图标更快，且能保证主题色一致。
+
+- 触及文件：
+  - 新增：`web/`（Vue 3 + Vite + TS 源码：`src/main.ts`、`App.vue`、`router.ts`、
+    `state/store.ts`、`api/client.ts`、`utils/format.ts`、`styles/base.css`、
+    9 个页面、4 个组件、`vite.config.ts`、`tsconfig.json`、`pnpm-workspace.yaml`）
+  - 新增：`app/static/icons/*.png`（5 个图标）、`app/static/sw.js`、
+    `app/static/spa/**`（构建产物，22 个文件 / 222KB）
+  - 新增：`scripts/make_icons.py`、`scripts/approve_pnpm_builds.py`
+  - 修改：`app/main.py`（挂载 `/static` 与 `/assets` —— 见下面的踩坑）
+  - 修改：`tests/test_api.py`（新增 4 条静态资源测试）
+
+- 执行过的命令与结果：
+  - `pnpm install` → **连续失败两次**，都是 pnpm 12 的配置位置/键名变化：
+    1. 写进 `package.json` 的 `pnpm.onlyBuiltDependencies` →
+       `The "pnpm" field in package.json is no longer read by pnpm`，无效。
+    2. 写进 `pnpm-workspace.yaml` 的 `onlyBuiltDependencies` → **依然无效**，
+       仍报 `ERR_PNPM_IGNORED_BUILDS`。
+       查 [pnpm v10→v11 迁移文档](https://pnpm.io/migration) 才确认：
+       v11 起 `onlyBuiltDependencies` / `neverBuiltDependencies` /
+       `ignoredBuiltDependencies` / `onlyBuiltDependenciesFile` **合并成了单一的
+       `allowBuilds` 映射**（`{ 包名: true | false }`）。改成 `allowBuilds` 后：
+       `esbuild postinstall: Done`，退出码 0。
+  - `pnpm exec vue-tsc --noEmit` → 首次 10 个错误，主要是 `noUnusedLocals`
+    抓出的未使用导入与死代码，以及一个真实的类型不匹配：
+    `createMemory` 的 `tags` 我标成了 `string[]`，而接口入参是**逗号分隔字符串**
+    且出参才是数组。新增 `MemoryCreatePayload` / `MemoryUpdatePayload`
+    把两者区分开。
+  - `pnpm run build` → 退出码 0。产物 gzip 后约 68KB（vendor 41KB）。
+  - 起本地服务（`:8000`，`provider=mock`）后逐个探测：
+    `/` 200、`/manifest.webmanifest` 200、`/sw.js` 200、
+    `/assets/vendor-*.js` 200、`/api/tasks` 401（未登录，符合预期）。
+    **但 `/static/icons/icon-192.png` → 404。**
+  - `uv run pytest -q -p no:cacheprovider` → 退出码 0：`440 passed, 1 skipped`。
+
+- 观察到的现象 / 反直觉之处 / 踩坑：
+  - **反直觉（本轮最重要的一条）**：`/static/*` **完全没有被挂载**。
+    前端 `index.html` 引用了图标，服务端却没有任何路由处理 `/static/`，
+    于是浏览器拿到 404。这是纯装配问题——代码都对，只是少了一行 `mount`。
+    **单测看不见它，只有真的去取一次才会发现**。这正是用户要求"用 browser 检查"
+    的价值所在；我暂时用 HTTP 探测 + Node 检查代替（原因见下面的阻塞项），
+    并把这件事固化成 4 条测试。
+  - **反直觉**：pnpm 的配置迁移踩了两次，而且**两次都不报致命错误**——
+    第一次是 WARNING（"字段不再被读取"），第二次是 `ERR_PNPM_IGNORED_BUILDS`
+    但却**不影响构建**（因为 esbuild 0.25 的平台二进制是通过 optionalDependency
+    `@esbuild/win32-x64` 分发的，不依赖 postinstall）。
+    也就是说：如果我只看"构建成功"，会一直不知道配置是错的；
+    而 `pnpm install` 的退出码 1 会打断任何 CI。**判据选错会让人漏掉真问题。**
+  - **反直觉**：我用 `vm.Script` 去"编译检查"产物，得到
+    `Cannot use import statement outside a module`。那是**检查方式错了**，
+    不是产物坏了——产物是 ESM，而 `vm.Script` 不认识 `import`。
+    换成 `node --check` 就对了。（和上面 pnpm 那件事同一个教训：
+    工具报错时先怀疑工具用错，再怀疑对象坏了。）
+  - 我第一版产物检查脚本把路径算错了（`path.join(app, '/static/...')`
+    会把以斜杠开头的路径当绝对路径直接返回），于是报了 3 个假的 MISS。
+    修好路径换算后全绿。**假失败会训练人忽略检查结果**，所以必须修掉而不是绕过。
+  - `vue-tsc` 的 `noUnusedLocals` 抓出了 7 处死代码（未使用的导入、写了没用的
+    `doneItems` / `showDone`）。这类东西在浏览器里完全看不出来，但会留在代码里
+    让人以为"这个变量还有用"。
+
+- 未决问题与下一步：
+  - **浏览器验证被阻塞（需要用户操作）**：`browser_session` 报
+    `the bsk CLI ("bsk") was not found. BrowserSkill must be installed and on PATH`。
+    本机既没有 `bsk`，也没有 `cargo` 可以编译它（插件本身装在
+    `~/.dsh/profiles/desktop/node_modules/@wxg-prc-cpg/browser-skill-dsh-plugin/`，
+    但只是插件壳，缺底层 CLI）。
+    用户明确要求"用 browser 自己检查"，所以这一条必须由用户装好 `bsk`
+    （见 https://github.com/Tencent/BrowserSkill）后我再补做视觉与交互验证。
+    **在补做之前，前端的动效与布局只能算"实现完成"，不能算"验收通过"。**
+  - 已用非浏览器手段覆盖的部分（`node .pytest-run/check-spa.cjs`）：
+    * index.html 的 6 个引用全部存在（含后端生成的 manifest）
+    * 入口 chunk 通过 `node --check`
+    * 9 个懒加载页面 chunk 齐全
+    * 产物里没有残留 `127.0.0.1:5173` / `localhost:8000` 这类开发期地址
+    * 产物总计 222KB（gzip 后约 68KB）
+    这些能覆盖"白屏/404"类问题，**覆盖不了**布局错位、动效是否顺、
+    触摸目标是否够大、深浅色对比度——那些只能在真浏览器里看。
+  - 前端还没部署到服务器：`app/static/spa/` 与图标已入库，但 8443 上跑的是
+    上一个提交的代码。部署一次即可上线（`deploy/install.sh` 幂等）。
+  - Scriptable 小组件与快捷指令文档已写好但**未真机验证**（同样需要先有界面）。
+  - 本地提交待用户推送（本会话的推送一律交给用户执行）。
+

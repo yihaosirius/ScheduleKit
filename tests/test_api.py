@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -56,6 +57,69 @@ async def test_api_404_is_json_not_html(anon) -> None:
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
     assert "detail" in response.json()
+
+
+async def test_icons_are_served(anon) -> None:
+    """图标必须能取到。
+
+    这条测试的由来：`/static/*` 一开始**根本没有挂载**——前端引用了图标，
+    但服务端没有任何路由处理它，于是浏览器拿到 404。
+    这是纯装配问题（代码都对，只是少了一行 mount），单测看不见，
+    只有真的去取一次才会发现。
+    """
+    for path in (
+        "/static/icons/icon-192.png",
+        "/static/icons/icon-512.png",
+        "/static/icons/apple-touch-icon.png",
+        "/static/icons/favicon-32.png",
+        "/static/icons/icon-maskable-512.png",
+    ):
+        response = await anon.get(path)
+        assert response.status_code == 200, f"{path} 取不到"
+        assert response.headers["content-type"].startswith("image/png")
+        assert response.content.startswith(b"\x89PNG"), f"{path} 不是 PNG"
+
+
+async def test_unknown_static_file_404s(anon) -> None:
+    """不存在的静态资源要 404，**不能**回退成 index.html。
+
+    否则一个写错的资源路径会静默返回 HTML，浏览器报的错会指向别处。
+    """
+    response = await anon.get("/static/icons/nope.png")
+    assert response.status_code == 404
+
+
+async def test_spa_assets_are_served_when_built(anon, configured) -> None:
+    """Vite 产物挂着 `/assets/` 前缀，必须能取到。
+
+    产物不存在时跳过（还没构建过前端），而不是让测试失败——
+    后端开发过程中不该被"前端没构建"卡住。
+    """
+    spa = Path(__file__).resolve().parent.parent / "app" / "static" / "spa"
+    assets = spa / "assets"
+    if not assets.exists():
+        pytest.skip("前端产物尚未构建（app/static/spa/assets 不存在）")
+
+    files = [p for p in assets.glob("*.js")]
+    assert files, "assets 目录里没有 js 产物"
+
+    response = await anon.get(f"/assets/{files[0].name}")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+
+async def test_spa_index_is_served_when_built(anon) -> None:
+    spa = Path(__file__).resolve().parent.parent / "app" / "static" / "spa" / "index.html"
+    response = await anon.get("/")
+    if spa.exists():
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        # SPA 外壳必须不缓存：缓存住会让用户一直看到旧外壳 + 新 JS
+        assert response.headers.get("cache-control") == "no-cache"
+    else:
+        # 没构建时给的是 503 的说明页，而不是空白 404 —— 更好排查
+        assert response.status_code == 503
+        assert "前端尚未构建" in response.text
 
 
 # --------------------------------------------------------------------------- #

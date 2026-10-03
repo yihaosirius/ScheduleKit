@@ -1,0 +1,14 @@
+# pnpm 设置。
+#
+# 为什么这个文件存在：pnpm 11 起不再读 package.json 里的 pnpm 字段，
+# 设置统一放这里；而且 v10 的 onlyBuiltDependencies 等四个键
+# 被合并成了单一的 allowBuilds 映射（见 https://pnpm.io/migration）。
+#
+# 默认不执行依赖的 postinstall 脚本（供应链安全）。这里只放行
+# 确实需要构建步骤的包：esbuild 用它安装平台二进制。
+# 白名单应当保持极短——每多批准一个包就多一分风险。
+
+packages: []
+
+allowBuilds:
+  esbuild: true

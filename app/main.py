@@ -19,6 +19,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -228,6 +229,8 @@ def _install_error_handlers(app: FastAPI) -> None:
 
 
 def _install_routes(app: FastAPI, cfg: Config) -> None:
+    from fastapi.staticfiles import StaticFiles
+
     from app.routers import auth as auth_router
     from app.routers import courses as courses_router
     from app.routers import drafts as drafts_router
@@ -236,6 +239,25 @@ def _install_routes(app: FastAPI, cfg: Config) -> None:
     from app.routers import settings as settings_router
     from app.routers import tasks as tasks_router
     from app.routers import ui as ui_router
+
+    # 静态资源：图标与 Vite 产物。
+    #
+    # `/static/spa/` 必须挂载：Vite 产物的 `index.html` 里引用的是
+    # `/assets/...`（绝对路径），但**页面路由可能是深层 hash 路由**——
+    # 只要引用是绝对的，`/assets/` 也能被下面的 mount 命中，所以产物与图标
+    # 用两个挂载点分别暴露，语义更清楚：
+    #   /static/icons/...  → 手工维护的图标
+    #   /static/spa/...    → 构建产物
+    #   /assets/...        → 同上（Vite 默认的产物引用路径）
+    static_dir = Path(__file__).resolve().parent / "static"
+    if static_dir.exists():
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    spa_dir = static_dir / "spa"
+    assets_dir = spa_dir / "assets"
+    if assets_dir.exists():
+        # 带内容哈希，可以长缓存；Caddy 侧也有同样的规则（双层保险不冲突）
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
@@ -249,4 +271,5 @@ def _install_routes(app: FastAPI, cfg: Config) -> None:
     app.include_router(courses_router.router, prefix="/api/courses", tags=["courses"])
     app.include_router(courses_router.timetable_router, prefix="/api/timetable", tags=["timetable"])
     app.include_router(settings_router.router, prefix="/api", tags=["settings"])
+    # SPA 回退必须**最后**注册：它带通配路径，注册早了会吃掉前面所有路由
     app.include_router(ui_router.router, include_in_schema=False)
