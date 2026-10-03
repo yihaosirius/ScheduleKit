@@ -58,11 +58,13 @@ PY_VER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 echo "  python3 $PY_VER / caddy $(caddy version | head -1)"
 
 # uv 用来装依赖到项目自带的 venv。没有就装一个（仅这一步会联网）。
+export PATH="$HOME/.local/bin:$PATH"
 if ! command -v uv >/dev/null && [[ ! -x "$INSTALL_DIR/.venv/bin/python" ]]; then
   log "安装 uv"
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
+command -v uv >/dev/null && echo "  uv $(uv --version 2>/dev/null | head -1)"
 
 # --------------------------------------------------------------------------- #
 # 1. 服务账号
@@ -190,13 +192,41 @@ fi
 log "读取配置"
 CFG_JSON="$(SK_CONFIG="$CONF_DIR/config.toml" \
   "$INSTALL_DIR/.venv/bin/python" -m app.cli show --json --secrets)"
-jq_get() { printf '%s' "$CFG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(eval('d'+'$1'))"; }
 
-DOMAIN="$(jq_get "['tls']['domain']")"
-SITE_PORT="$(jq_get "['tls']['port']")"
-CERT_DIR="$(jq_get "['tls']['cert_dir']")"
-UPSTREAM="$(jq_get "['server']['listen_host']")$(printf ':%s' "$(jq_get "['server']['listen_port']")")"
-DUCKDNS_TOKEN="$(jq_get "['tls']['duckdns_token']")"
+# 从配置 JSON 里按"点分路径"取值，例如 `jget tls.domain`。
+#
+# 刻意**不用** `python3 -c "...eval('d'+'$1')..."` 那种拼字符串的做法：
+# 引号会在 shell → python 的传递中被吃掉一层，得到一个畸形的表达式
+# （实测报 `SyntaxError: invalid syntax. Perhaps you forgot a comma?`）。
+# 改成把路径当**参数**传给一段固定的脚本，不接受任何拼接。
+jget() {
+  printf '%s' "$CFG_JSON" | python3 -c '
+import json, sys
+node = json.load(sys.stdin)
+for part in sys.argv[1].split("."):
+    if not part:
+        continue
+    if isinstance(node, list):
+        node = node[int(part)]
+    else:
+        node = node[part]
+if node is None:
+    print("")
+elif isinstance(node, bool):
+    print("true" if node else "false")
+else:
+    print(node)
+' "$1"
+}
+
+DOMAIN="$(jget tls.domain)"
+SITE_PORT="$(jget tls.port)"
+CERT_DIR="$(jget tls.cert_dir)"
+LISTEN_HOST="$(jget server.listen_host)"
+LISTEN_PORT="$(jget server.listen_port)"
+UPSTREAM="${LISTEN_HOST}:${LISTEN_PORT}"
+DUCKDNS_TOKEN="$(jget tls.duckdns_token)"
+TLS_PROVIDER="$(jget tls.provider)"
 echo "  domain=$DOMAIN port=$SITE_PORT upstream=$UPSTREAM cert_dir=$CERT_DIR"
 
 [[ -n "$DOMAIN" && -n "$SITE_PORT" ]] || die "配置里缺少 tls.domain 或 tls.port"
@@ -318,7 +348,7 @@ echo "  caddy 已重启"
 # --------------------------------------------------------------------------- #
 log "配置 DuckDNS 同步"
 DUCKDNS_SH="$CONF_DIR/duckdns-update.sh"
-if [[ "$(jq_get "['tls']['provider']")" == "duckdns" ]]; then
+if [[ "$TLS_PROVIDER" == "duckdns" ]]; then
   # 脚本从配置读 token，**不把 token 写进脚本本身**：
   # 上一版把 token 硬编码在脚本里，导致它随脚本一起进了仓库。
   cat > "$DUCKDNS_SH" <<'SH'
