@@ -1,0 +1,58 @@
+[Unit]
+Description=ScheduleKit 个人任务管理服务
+Documentation=https://github.com/yihaosirius/ScheduleKit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 独立的低权限账号。**不要**用 root 跑：这个服务会解析图片、调外部 API，
+# 是这台机器上攻击面最大的东西。
+User=schedulekit
+Group=schedulekit
+WorkingDirectory=/opt/schedulekit
+Environment=SK_CONFIG=/etc/schedulekit/config.toml
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/schedulekit/.venv/bin/python -m app.serve
+
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+# ── 加固 ────────────────────────────────────────────────────────────────────
+# 只监听回环，对外一律经 Caddy；这里再收一遍权限，减少被拿下的影响面。
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+# ProtectSystem=strict 下整个文件系统只读，所以要显式放开两处写入：
+#   /var/lib/schedulekit —— 数据库、上传图片、备份
+#   /etc/schedulekit     —— 控制台保存 [llm] 配置需就地改写 config.toml
+#
+# 第二处看起来危险（应用能改自己的配置），但这是刻意接受的：控制台的核心价值
+# 就是"改完立刻生效"，而把配置交给部署脚本代写会引入一个必须常驻的协调者。
+# 真正的边界是"应用只能写这两个目录"，而不是"应用不能写配置"。
+ReadWritePaths=/var/lib/schedulekit /etc/schedulekit
+
+# 内存上限。服务器只有 1.6G 内存，且同时跑着 cloudreve / postgres / redis /
+# portainer。目标常驻 100–140MB，这里留余量；真撞上限会被 systemd 重启，
+# 比 OOM 拖垮整机好。
+MemoryMax=256M
+MemoryHigh=192M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=schedulekit
+
+[Install]
+WantedBy=multi-user.target

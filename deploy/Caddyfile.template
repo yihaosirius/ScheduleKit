@@ -1,0 +1,81 @@
+# ScheduleKit 的 Caddy 站点配置模板。
+#
+# install.sh 用 config.toml 里的值替换下面的占位符，然后写入
+# /etc/caddy/Caddyfile。占位符与来源的对应关系：
+#
+#   __DOMAIN__     -> [tls].domain
+#   __SITE_PORT__  -> [tls].port
+#   __CERT_DIR__   -> [tls].cert_dir
+#   __UPSTREAM__   -> [server].listen_host:port
+#
+# ⚠️ 占位符的字面量刻意不出现在下面的注释里：sed 会把注释里的也一起替换，
+#    结果服务器上的注释会变成读不懂的样子（上一版踩过这个坑）。
+#
+# 端口选择（重要，不要"顺手改成 443"）：
+#   * 站点跑在 __SITE_PORT__。原因有两条硬约束：
+#     1. 手机上已装好的快捷指令写的是这个端口，换端口要重新编辑并分发快捷指令；
+#     2. 80/443 是备案相关端口。用非标端口就绕开了备案要求，
+#        改用 443 会重新引入这个问题。**没有备案就不能碰 443。**
+#   * 因此下面必须显式写 https:// scheme，否则 Caddy 会因为端口不是 443
+#     而按 HTTP 处理。
+#
+# 证书用显式的 tls 指令而不是让 Caddy 自动 ACME：证书由 acme.sh 走 DNS-01 签发，
+# 不需要 80/443 入站，也就不触发备案条件。
+
+{
+	# 关掉管理端点，单机不需要。
+	#
+	# ⚠️ 代价：`caddy reload` 走的就是 :2019 管理端点，关掉之后
+	# **`systemctl reload caddy` 一定失败**，报
+	#   `dial tcp 127.0.0.1:2019: connect: connection refused`
+	# 改配置后请用 `systemctl restart caddy`。
+	admin off
+
+	# 日志写 stdout，由 systemd 收进 journald。
+	#
+	# 这里**不能**写 `output journal`：那个 writer 属于第三方插件
+	# （模块名 caddy.logging.writers.journal），标准构建里没有，
+	# 会导致 `caddy validate` 直接失败。
+	log {
+		output stdout
+		format console
+	}
+}
+
+https://__DOMAIN__:__SITE_PORT__ {
+	tls __CERT_DIR__/fullchain.pem __CERT_DIR__/privkey.pem
+
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "same-origin"
+		Cross-Origin-Opener-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self'; connect-src 'self'; worker-src 'self' blob:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+		-Server
+	}
+
+	reverse_proxy __UPSTREAM__ {
+		# 让应用拿到真实客户端 IP（登录限流按 IP 计数）
+		header_up X-Real-IP {remote_host}
+	}
+
+	# 带哈希指纹的静态资源可以长缓存（Vite 产物的文件名含内容哈希）
+	@immutable path /assets/* /static/spa/assets/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+	# Service Worker 与 manifest 绝不能长缓存：改了 sw.js 却拿不到新版，
+	# 是 PWA 最难排查的一类问题。
+	@nocache path /sw.js /manifest.webmanifest
+	header @nocache Cache-Control "no-cache"
+
+	# index.html 同理，必须每次回源，否则用户会看到旧的 SPA 外壳。
+	@shell path / /index.html
+	header @shell Cache-Control "no-cache"
+
+	# 健康检查不打日志，免得刷屏
+	@health path /healthz
+	log_skip @health
+}
