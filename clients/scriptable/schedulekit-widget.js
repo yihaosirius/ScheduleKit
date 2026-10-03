@@ -267,9 +267,14 @@ function renderHome(payload, stale) {
   w.setPadding(12, 14, 12, 14);
   w.backgroundColor = Color.dynamic(new Color("#ffffff", 1), new Color("#1c1e21", 1));
 
-  // ★ 必须先声明主轴方向。不调这一行时，顶层 `addSpacer()` 不会产生
-  //   "把后面的内容推到底部"的效果，整个组件会呈现为居中/错位。
-  w.layoutVertically();
+  // 注意：**不要**在这里调 `w.layoutVertically()`。
+  // Scriptable 的 `layoutVertically()` / `layoutHorizontally()` 只属于
+  // **stack 元素**（`addStack()` 的返回值），ListWidget 上没有这两个方法——
+  // 调了会在真机上直接抛
+  //   TypeError: w.layoutVertically is not a function
+  // 而且 ListWidget 的内容本来就是自上而下排列的，本来也不需要声明。
+  // （假 API 里我给 ListWidget 也提供了这两个方法，所以测试没抓到，
+  //   这是 harness 与真机的差异，见 docs/widget.md。）
 
   const status = payload.status || {};
   const ordered = (payload.ordered && payload.ordered.items) || [];
@@ -409,12 +414,12 @@ function renderAccessory(payload, family, stale) {
     return w;
   }
 
-  // 锁屏是单色渲染，用白色；间距也要收紧
+  // 锁屏是单色渲染，用白色；间距也要收紧。
+  // 不要在这里调 `w.layoutVertically()` / `w.centerAlignContent()` ——
+  // 它们是 stack 专属方法，ListWidget 上没有（真机会抛 TypeError）。
   w.setPadding(0, 2, 0, 2);
-  w.layoutVertically();
 
   if (family === "accessoryCircular") {
-    w.centerAlignContent();
     if (!first) {
       const none = w.addText(stale ? "离线" : "无");
       none.font = Font.systemFont(12);
@@ -506,9 +511,8 @@ function accessoryEmpty(text) {
     w.addText(text);
     return w;
   }
+  // 居中靠文本自身的 centerAlignText()，不要用 stack 的 centerAlignContent()
   w.setPadding(0, 2, 0, 2);
-  w.layoutVertically();
-  w.centerAlignContent();
   const t = w.addText(text);
   t.font = Font.systemFont(11);
   t.textColor = Color.white();
@@ -522,7 +526,8 @@ function accessoryEmpty(text) {
 function messageWidget(title, lines, isError) {
   const w = new ListWidget();
   w.setPadding(12, 14, 12, 14);
-  w.layoutVertically();
+  // 不调 w.layoutVertically()：ListWidget 本来就没有这个方法，
+  // 它的内容天然自上而下排列。
 
   const head = w.addText(title);
   head.font = Font.boldSystemFont(13);
