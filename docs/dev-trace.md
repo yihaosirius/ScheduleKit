@@ -790,3 +790,92 @@
   - Scriptable 小组件与快捷指令文档已写好但**未真机验证**（同样需要先有界面）。
   - 本地提交待用户推送（本会话的推送一律交给用户执行）。
 
+---
+
+## 2026-10-03 21:33 · 浏览器实测：抓到 5 个只有真浏览器才暴露的缺陷
+
+- 目标：用户要求"写前端记得用 browser 自己检查"。这一轮用 browser-skill 在 Edge 里
+  实际操作**部署在 8443 上的真实前端**，而不是只看构建是否成功。
+
+- 决策与理由：
+  - **验证对象选"已部署的公网地址"**，不是本地 dev server。
+    - 理由：真实环境才有 Caddy、真 HTTPS、真 Service Worker 与跨网络时序。
+      本轮抓到的 `Cache-Control` 重复问题只在 Caddy 在场时出现。
+    - 被否决：本地 `pnpm dev` + 代理。否决原因是它跳过 Caddy 这一层，
+      而这一层恰好是问题的来源。
+  - **先走真实链路再造数据**：用 API Key 调 `/api/ingest` 生成草稿，而不是直接改库。
+    - 理由：这样连"快捷指令那条路"也一起验了（响应里 `channel=shortcut`）。
+  - **每页都看可访问性树，不只截图**。
+    - 理由：可访问性树能直接读出"哪些按钮是 disabled"。二选一联动就是靠它一眼确认的
+      （有截止时间的条目优先级按钮为 disabled，没有的可用）。
+  - **把静态约定用 pytest 钉住**（新增 `tests/test_web_contract.py`，11 条）。
+    - 理由：视觉只能靠浏览器看，但"直接截断 UTC 时间戳"这类是纯静态问题，
+      值得一次性固化成回归测试。
+    - 被否决：只靠人工记得。否决原因是本轮这类错误一次出现两处，
+    而且它们在界面上**看起来完全正常**。
+
+- 触及文件：
+  - 新增：`tests/test_web_contract.py`（11 条前端静态约定测试）
+  - 修改：`web/src/pages/DraftConfirmPage.vue`（动作条让出 dock 高度）
+  - 修改：`web/src/components/TaskCard.vue`（时间改用 `formatDateTime`）
+  - 修改：`web/src/pages/SettingsPage.vue`（key"最近使用"改用 `formatRelative`）
+  - 修改：`web/index.html`（补标准的 `mobile-web-app-capable`）
+  - 修改：`web/src/pages/LoginPage.vue`、`web/src/styles/base.css`
+    （隐藏 username 字段 + `.sr-only`）
+  - 修改：`deploy/Caddyfile.template`、`app/main.py`
+    （Cache-Control 单一来源 + `_CachedStaticFiles`）
+  - 新增（gitignore 内）：`.pytest-run/verify-frontend.mjs`
+
+- 执行过的命令与结果：
+  - `browser_session` 起会话失败两次：
+    1. `the bsk CLI ("bsk") was not found`（当时还没装）
+    2. 装好后 `cannot start an independent Windows daemon ... Job Object breakaway`
+       —— DSH 的 Job Object 阻止 daemon 脱离。改用
+       `bsk daemon start --foreground` 作为后台任务启动成功；但**随后发现用户那边
+       已有 daemon**，我那次尝试其实是多余的（报 `daemon lock is already held`）。
+  - 在 Edge 里逐页操作并截图：登录 → 首页三视图 → 新建任务（含模式切换）→
+    勾选完成 → 深色模式 → 确认页 → 入库 → 课表（含网格）→ 记忆 → 设置 → PC 宽屏。
+  - 造数据：服务端建 API Key → `POST /api/ingest` → 3 条解析结果
+    （`channel=shortcut`，两条相对时间被解析成具体日期）。
+    这一步踩了坑：**把 key 当 PowerShell 参数传给 Node 会被改坏**，得到 401；
+    把 key 直接内联进脚本就正常。
+  - `uv run pytest -q -p no:cacheprovider` → 退出码 0：`455 passed, 1 skipped`。
+  - `node .pytest-run/verify-frontend.mjs`（公网 8443）→ **23/23 通过**。
+
+- 观察到的现象 / 反直觉之处 / 踩坑（本轮抓到的 5 个缺陷）：
+  1. **`Cache-Control` 有两个来源**（应用 + Caddy）。真实响应里出现两个同名头
+     （`/`、`/sw.js`、`/manifest.webmanifest` 都是 `no-cache, no-cache`），
+     而图标**一个缓存头都没有**。这种配置不报错，只会让以后改策略时只改一半。
+  2. **确认页动作条被底部 dock 遮住一半**（截图可见）。
+     `sticky; bottom: 0` 是相对滚动容器的 padding box，而外层 `.shell__main` 的
+     padding-bottom 只保证"滚动到底时"内容不被挡——两者不是一回事。
+  3. **任务卡片显示 UTC 时间**：`2026-10-04 15:59`（本应 23:59）。
+     根因 `due_at.slice(0, 16)`。服务端按约定只存 UTC，直接截断必然差 8 小时，
+     而**它在界面上看起来完全正常**——只能靠"知道正确值该是多少"来发现。
+     设置页的时间戳有同样问题。
+  4. **`apple-mobile-web-app-capable` 被 Chrome 标为 deprecated**。
+     但 iOS 至今只认它，所以不能简单替换，两个 meta 都要输出。
+  5. **密码表单缺少 username 字段**（Chromium 可访问性警告）。
+     加视觉隐藏的 username；**不能用 `display: none`**——那会把元素从可访问性树
+     摘掉，等于没加（改用 `.sr-only` 的裁剪写法）。
+  - **反直觉**：修复后控制台**仍然**显示那两条警告，我一度以为没生效。
+    实际那是修复前的日志，硬刷新后消失。判断"日志是不是本次的"要看时序。
+  - **反直觉**：剩下 4 条 `Unrecognized feature: 'attribution-reporting'` 等
+    Permissions-Policy 警告，我怀疑是自己写的安全头；查代码才确认
+    **我们根本没设 Permissions-Policy**——那是 Edge 自身的广告特性。
+    差点去改一个不存在的问题。
+  - 浏览器会话里的 refs 在每次 DOM 变化后失效，必须先 `observe` 再操作；
+    隔几轮复用 `@e57` 这类引用一定会失败。
+
+- 未决问题与下一步：
+  - **本轮已覆盖**：登录、首页三视图、新建表单（含二选一模式切换）、勾选完成、
+    深浅色、录入→草稿→确认→入库全链路、override 横幅、课表网格、记忆、设置、
+    PC 宽屏布局、控制台洁净度。
+  - **仍未覆盖**：真机（iPhone Safari）的 PWA 安装、"添加到主屏幕"、
+    刘海屏 safe-area 的实际表现、触摸手感、iOS 上的 Service Worker 作用域。
+    这些只能在手机上确认。
+  - 动效只确认了"静态帧看起来对"，没有逐帧检查缓动曲线——属主观验收，留给用户。
+  - QA 数据已清理（`items` / `ingest_drafts` / `courses` 归零，临时 Key 已吊销），
+    服务保持运行。
+  - 3 个提交待推送（`9443c2d` / `1252db2` / `5940f14`），按约定交给用户。
+
