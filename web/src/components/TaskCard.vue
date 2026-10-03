@@ -12,7 +12,7 @@
  */
 import { computed, ref } from 'vue'
 import type { Task } from '@/api/client'
-import { categoryLabel, dueState, priorityLabel } from '@/utils/format'
+import { categoryLabel, dueState, formatDateTime, priorityLabel } from '@/utils/format'
 
 const props = defineProps<{
   task: Task
@@ -90,7 +90,7 @@ async function onToggle(): Promise<void> {
         </div>
       </div>
 
-      <div v-if="isOrdered" class="task__when">{{ task.due_at?.slice(0, 16).replace('T', ' ') }}</div>
+      <div v-if="isOrdered" class="task__when">{{ formatDateTime(task.due_at) }}</div>
 
       <button
         v-if="hasNotes"

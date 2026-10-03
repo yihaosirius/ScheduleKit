@@ -16,6 +16,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, type ApiKey, type Settings } from '@/api/client'
 import { notify, report } from '@/state/store'
+import { formatRelative } from '@/utils/format'
 
 const router = useRouter()
 
@@ -394,7 +395,13 @@ onMounted(load)
               </div>
               <div class="key__meta">
                 <code>{{ key.prefix }}…</code>
-                <span>{{ key.last_used_at ? `最近使用 ${key.last_used_at.slice(0, 16).replace('T', ' ')}` : '从未使用' }}</span>
+                <span>
+                  {{
+                    key.last_used_at
+                      ? `最近使用 ${formatRelative(key.last_used_at)}`
+                      : '从未使用'
+                  }}
+                </span>
               </div>
             </div>
             <button
