@@ -248,6 +248,16 @@ def test_done_card_shows_absolute_time_not_countdown() -> None:
     # 已完成不再显示优先级档位
     assert "!isDone" in text
 
+    # 已完成不该带上紧急度状态（逾期/今天/即将）。
+    # 逾期后完成的任务在后端看仍然有过去的 due_at，不排除它就会一直带着
+    # 红色"逾期"左边条——而那是给"还没做且已经晚了"用的。
+    assert "isDone.value ? 'done' : dueState" in text, (
+        "已完成的任务要跳出 dueState，否则逾期后完成的条目会一直显示逾期标记"
+    )
+    assert "border-left-color: transparent" in text, (
+        "已完成要显式清掉左边条，不能只靠'状态不命中'"
+    )
+
     # 不再需要冗余的"已完成"文字 chip（绿色对勾已经表达了）
     assert 'class="sk-chip sk-chip--ok">已完成' not in text, (
         "已完成条目不需要额外的文字标签，绿色对勾已经足够"

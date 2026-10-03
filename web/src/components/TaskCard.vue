@@ -28,13 +28,21 @@ const emit = defineEmits<{
 const expanded = ref(false)
 const completing = ref(false)
 
-const state = computed(() => dueState(props.task))
 const hasNotes = computed(() => props.task.notes.trim().length > 0)
 
 /** 需求里的"二选一"决定了卡片显示哪一种主信息 */
 const isOrdered = computed(() => props.task.due_at !== null)
 
 const isDone = computed(() => props.task.status === 'done')
+
+/**
+ * 卡片的紧急度状态。
+ *
+ * **已完成的一律是 'done'**：否则逾期后完成的任务会一直带着红色逾期左边条，
+ * 而那是给"还没做且已经晚了"的东西用的标记。用户明确提过
+ * 已完成条目不该显示逾期标记。
+ */
+const state = computed(() => (isDone.value ? 'done' : dueState(props.task)))
 
 /**
  * 卡片上显示的那个绝对时间。
@@ -197,6 +205,15 @@ async function onToggle(): Promise<void> {
 .task--completing {
   transform: translateX(10px) scale(0.98);
   opacity: 0.35;
+}
+
+/* 已完成：不再有任何紧急度语义。
+ *
+ * 显式写出来而不是依赖"状态是 done 所以不命中上面三条"——因为逾期后完成的
+ * 任务在后端看仍然有过去的 due_at，不做这一步它就会一直带着红色左边条，
+ * 而那是给"还没做且已经晚了"用的标记。 */
+.task--done {
+  border-left-color: transparent;
 }
 
 .task--done .task__title {
