@@ -83,19 +83,38 @@ if [[ ! -f "$CONF_DIR/config.toml" ]]; then
   if [[ $INIT -eq 0 ]]; then
     die "找不到 $CONF_DIR/config.toml。首次部署请加 --init"
   fi
-  log "生成配置（首字部署）"
+  log "生成配置（首次部署）"
   cp "$SRC_DIR/config.toml.example" "$CONF_DIR/config.toml"
   # 数据目录固定到 /var/lib，而不是配置里的相对路径
   sed -i 's|^data_dir *=.*|data_dir    = "/var/lib/schedulekit"|' "$CONF_DIR/config.toml"
-  chown "$SERVICE_USER:$SERVICE_USER" "$CONF_DIR/config.toml"
-  chmod 0600 "$CONF_DIR/config.toml"
-  echo "  已写入 $CONF_DIR/config.toml（记得填 LLM API Key 与 DuckDNS token）"
+  echo "  已写入 $CONF_DIR/config.toml"
 else
   echo "  配置已存在：$CONF_DIR/config.toml"
 fi
-# 目录属服务账号：控制台要就地改写 [llm] 段
-chown "$SERVICE_USER:$SERVICE_USER" "$CONF_DIR"
+chown "$SERVICE_USER:$SERVICE_USER" "$CONF_DIR" "$CONF_DIR/config.toml"
 chmod 0750 "$CONF_DIR"
+chmod 0600 "$CONF_DIR/config.toml"
+
+# DuckDNS token：从环境变量注入（首次）。已经配过就不覆盖。
+if [[ -n "${SK_DUCKDNS_TOKEN:-}" ]]; then
+  log "写入 DuckDNS token"
+  python3 - "$CONF_DIR/config.toml" "$SK_DUCKDNS_TOKEN" <<'PY'
+import sys
+from pathlib import Path
+path, token = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text(encoding="utf-8")
+# 逐行替换 [tls] 段里的 duckdns_token，不动其它内容与注释
+out, in_tls = [], False
+for line in text.splitlines(keepends=True):
+    if line.lstrip().startswith("["):
+        in_tls = line.strip() == "[tls]"
+    if in_tls and line.lstrip().startswith("duckdns_token"):
+        line = f'duckdns_token = "{token}"\n'
+    out.append(line)
+path.write_text("".join(out), encoding="utf-8")
+print("  已写入 tls.duckdns_token（0600，不入仓库）")
+PY
+fi
 
 install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$DATA_DIR"
 
@@ -138,33 +157,39 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 
 # --------------------------------------------------------------------------- #
 # 5. 数据库与密码
+#
+# ⚠️ `sudo -u user` **默认会重置环境变量**（env_reset），所以不能写成
+#    `SK_X=1 sudo -u user cmd`——变量根本传不进去。必须显式 `sudo env K=V ...`。
+#    第一次部署就是踩了这个：`set-password` 拿不到 SK_NEW_PASSWORD，
+#    报"没有拿到新密码"，而外层脚本因为管道/命令替换的关系看不出来。
 # --------------------------------------------------------------------------- #
 log "初始化数据库"
-SK_CONFIG="$CONF_DIR/config.toml" \
-  sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/python" -m app.cli migrate
+# 以服务账号身份跑（数据目录属主是它），通过 env 显式传配置路径
+sudo -u "$SERVICE_USER" env "SK_CONFIG=$CONF_DIR/config.toml" \
+  "$INSTALL_DIR/.venv/bin/python" -m app.cli migrate
 
 if [[ $INIT -eq 1 ]]; then
-  # 交互式设密码。支持 SK_NEW_PASSWORD 以便无人值守部署。
-  if [[ -n "${SK_NEW_PASSWORD:-}" ]]; then
-    SK_CONFIG="$CONF_DIR/config.toml" SK_NEW_PASSWORD="$SK_NEW_PASSWORD" \
-      sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/python" -m app.cli set-password
-  else
-    read -r -s -p "为管理员设置登录密码：" PW
+  if [[ -z "${SK_NEW_PASSWORD:-}" ]]; then
+    read -r -s -p "为管理员设置登录密码：" SK_NEW_PASSWORD
     echo
-    [[ -n "$PW" ]] || die "密码不能为空"
-    # 用环境变量传密码：避免出现在 ps 的命令行里
-    SK_CONFIG="$CONF_DIR/config.toml" SK_NEW_PASSWORD="$PW" \
-      sudo -u "$SERVICE_USER" "$INSTALL_DIR/.venv/bin/python" -m app.cli set-password
-    unset PW
+    [[ -n "$SK_NEW_PASSWORD" ]] || die "密码不能为空"
+    export SK_NEW_PASSWORD
   fi
+  sudo -u "$SERVICE_USER" env \
+    "SK_CONFIG=$CONF_DIR/config.toml" \
+    "SK_NEW_PASSWORD=$SK_NEW_PASSWORD" \
+    "$INSTALL_DIR/.venv/bin/python" -m app.cli set-password
+  unset SK_NEW_PASSWORD
 fi
 
 # --------------------------------------------------------------------------- #
 # 6. 读配置（唯一入口是 app.cli，脚本不解析 TOML）
+#
+# 以 root 读：root 一定能读 0600 的配置，不需要冒"环境变量没传进去"的风险。
 # --------------------------------------------------------------------------- #
 log "读取配置"
 CFG_JSON="$(SK_CONFIG="$CONF_DIR/config.toml" \
-  "$INSTALL_DIR/.venv/bin/python" -m app.cli show --json)"
+  "$INSTALL_DIR/.venv/bin/python" -m app.cli show --json --secrets)"
 jq_get() { printf '%s' "$CFG_JSON" | python3 -c "import json,sys; d=json.load(sys.stdin); print(eval('d'+'$1'))"; }
 
 DOMAIN="$(jq_get "['tls']['domain']")"
