@@ -50,6 +50,22 @@ onMounted(() => {
       </div>
 
       <form class="login__form" @submit.prevent="submit">
+        <!-- 隐藏的账号字段：只为满足浏览器的可访问性/密码管理器要求。
+             本应用是单用户、没有"用户名"这个概念，但 Chromium 会因为
+             "密码表单缺少 username 字段" 报警告，而且密码管理器也更愿意保存
+             带 username 的表单（否则可能每次都问"保存密码？"）。
+             `autocomplete="username"` + 视觉隐藏是标准做法。 -->
+        <input
+          class="sr-only"
+          type="text"
+          name="username"
+          autocomplete="username"
+          tabindex="-1"
+          aria-hidden="true"
+          value="schedulekit"
+          readonly
+        />
+
         <label class="sk-label" for="password">管理员密码</label>
         <input
           id="password"
@@ -57,6 +73,7 @@ onMounted(() => {
           v-model="password"
           class="sk-input"
           type="password"
+          name="password"
           autocomplete="current-password"
           placeholder="••••••••"
         />

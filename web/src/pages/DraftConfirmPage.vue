@@ -726,12 +726,23 @@ onMounted(load)
 }
 
 /* ── 动作区 ─────────────────────────────────────────────────── */
+/* 动作条要"贴住 dock 上沿"，而不是 `bottom: 0`。
+ *
+ * 为什么：外层 `.shell__main` 的 padding-bottom 只保证**滚动到底时**内容不被
+ * dock 挡住；而 sticky 元素的 `bottom: 0` 是相对滚动容器的 padding box，
+ * 于是动作条会停在**视口底部、dock 背后**——实测两者叠在一起，按钮被遮住一半。
+ *
+ * 用 `bottom: dock 高度 + 安全区` 让动作条始终浮在 dock 上方；
+ * PC 端 dock 变成侧栏（不再固定底栏），所以断点里改回 0。 */
 .actions {
   position: sticky;
-  bottom: 0;
+  bottom: calc(var(--dock-h) + var(--safe-bottom));
+  z-index: 10;
   margin-top: 16px;
-  padding: 12px 0 calc(4px + var(--safe-bottom));
+  padding: 12px 0 10px;
   background: var(--bg);
+  /* 上边界用阴影淡出，避免"内容被硬切"的观感 */
+  box-shadow: 0 -8px 12px -8px rgba(0, 0, 0, 0.12);
 }
 
 .actions__error {
@@ -799,7 +810,11 @@ onMounted(load)
   }
 
   .actions {
+    /* PC 上 dock 是左侧栏，底部没有遮挡，可以贴到容器底部 */
+    bottom: 0;
     padding-bottom: 12px;
+    box-shadow: none;
+    border-top: 1px solid var(--border);
   }
 }
 </style>

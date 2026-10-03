@@ -10,7 +10,12 @@
     />
     <meta name="description" content="围绕学业构建的待办事项系统：有序表 / 无序表、拍照录入、课表上下文" />
 
-    <!-- iOS 添加到主屏幕后的表现 -->
+    <!-- 添加到主屏幕后的表现。
+         `apple-mobile-web-app-capable` 已被 Chrome 标为 deprecated（控制台会
+         警告），标准名是 `mobile-web-app-capable`；但 **iOS 至今只认 apple- 那个**。
+         所以两个都留：只留标准名会让 iOS 上看起来像普通书签，
+         只留 apple 名则会在 Chrome 里刷警告。 -->
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="ScheduleKit" />
