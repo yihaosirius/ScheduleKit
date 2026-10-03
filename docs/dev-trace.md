@@ -842,7 +842,8 @@
   - `uv run pytest -q -p no:cacheprovider` → 退出码 0：`455 passed, 1 skipped`。
   - `node .pytest-run/verify-frontend.mjs`（公网 8443）→ **23/23 通过**。
 
-- 观察到的现象 / 反直觉之处 / 踩坑（本轮抓到的 5 个缺陷）：
+- 观察到的现象 / 反直觉之处 / 踩坑：
+  本轮抓到 5 个缺陷：
   1. **`Cache-Control` 有两个来源**（应用 + Caddy）。真实响应里出现两个同名头
      （`/`、`/sw.js`、`/manifest.webmanifest` 都是 `no-cache, no-cache`），
      而图标**一个缓存头都没有**。这种配置不报错，只会让以后改策略时只改一半。
