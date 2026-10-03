@@ -1,0 +1,41 @@
+# 行尾与编码约定。
+#
+# 为什么需要这个文件：开发在 Windows、部署在 Linux。Windows 上的 git 默认
+# 会把文本文件的 LF 换成 CRLF（git status 里那一堆 "LF will be replaced by CRLF"
+# 警告就是这个）。一旦 shell 脚本带着 CRLF 上服务器，会得到
+#   bash: ./install.sh: /usr/bin/env: bad interpreter: No such file or directory
+# 或更奇怪的 `$'\r': command not found`——而且报错位置会指向毫不相干的行。
+#
+# 所以：仓库内一律 LF；shell/Python 强制 LF（text eol=lf）；
+# 二进制文件明确标出来，避免被当文本处理。
+
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.py            text eol=lf
+*.sql           text eol=lf
+*.md            text eol=lf
+*.toml          text eol=lf
+*.js            text eol=lf
+*.mjs           text eol=lf
+*.ts            text eol=lf
+*.vue           text eol=lf
+*.css           text eol=lf
+*.html          text eol=lf
+*.json          text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+Caddyfile       text eol=lf
+Caddyfile.template text eol=lf
+.gitattributes  text eol=lf
+.gitignore      text eol=lf
+
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.webp          binary
+*.ico           binary
+*.woff          binary
+*.woff2         binary
+*.lock          binary
+uv.lock         text eol=lf
