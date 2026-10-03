@@ -50,9 +50,14 @@ watch(open, (value) => {
       <span class="collapsible__hint">{{ open ? '收起' : '展开' }}</span>
     </button>
 
-    <!-- 高度动画：外层 grid 0fr→1fr，内层 overflow:hidden -->
+    <!-- 高度动画：外层 grid 0fr→1fr，内层 overflow:hidden。
+         光有 overflow:hidden 不够——被裁掉的内容**仍在可访问性树里**，
+         屏幕阅读器与 Tab 仍能找到它（这一点是靠浏览器的可访问性树视图发现的：
+         收起状态下已完成的任务仍然出现在树里）。所以配 `visibility: hidden`
+         把它真正移出去；展开时立刻变 visible，收起时延到动画结束，
+         否则会把高度动画一起吃掉。 -->
     <div class="collapsible__wrap">
-      <div class="collapsible__body">
+      <div class="collapsible__body" :inert="!open">
         <slot />
       </div>
     </div>
@@ -138,5 +143,15 @@ watch(open, (value) => {
 .collapsible__body {
   overflow: hidden;
   min-height: 0;
+  /* 收起时把内容移出可访问性树（`inert` 负责交互，`visibility` 负责呈现与
+     屏幕阅读器）。展开时立刻可见，收起时延迟到动画结束——否则高度动画
+     会因为内容瞬间消失而变成"咔"一下。 */
+  visibility: hidden;
+  transition: visibility 0s linear var(--dur-slow);
+}
+
+.collapsible--open .collapsible__body {
+  visibility: visible;
+  transition-delay: 0s;
 }
 </style>
