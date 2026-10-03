@@ -245,3 +245,84 @@
     记忆条目注入预算是 `[ingest].memory_char_budget`，注入留痕写 `draft_memories`
     与 `items.memory_ids`。
 
+---
+
+## 2026-10-03 18:52 · 端口回退到 8443（备案 + 已有快捷指令），并把 push 与阻塞项写成约定
+
+- 目标：纠正上一轮我自己做出的错误判断——我按"标准端口更省事"把站点从 `:8443`
+  改到了 `:443`。用户否决，理由是两条我没想到的硬约束。这一轮把它改回来，
+  并把**这两条理由本身**固化成测试与文档，避免以后被"顺手优化"掉。
+
+- 决策与理由：站点继续保持 `:8443`，Caddyfile 显式写
+  `https://canisa1ph.duckdns.org:8443`。
+  - 理由一：**手机上已装好的快捷指令写死了 `:8443`**。换端口就要重新编辑并在手机上
+    重新分发快捷指令，用户侧有实打实的成本。我上一轮只算了服务端的账。
+  - 理由二：**80/443 是备案相关端口**。用 8443 恰恰是为了绕开备案要求，
+    改回 443 会把这个问题重新引进来。
+  - 我原先的理由（"非标端口会踩 SW 作用域 / Cookie SameSite / 添加到主屏幕三个坑"）
+    仍然成立，但它是一个**副作用层面的代价**，而上面两条是**约束**。约束压倒代价。
+  - 被否决：**443 与 8443 双开**。双开并不能让快捷指令少改，反而多一个对外入口
+    与一份要维护的证书/站点块。
+  - 被否决：**改成 443 但保留 8443 跳转**。同上，且跳转解决不了快捷指令里写死的端口。
+  - 同时新增两条交互约定（写进 `AGENTS.md` §2）：
+    * `git push` **必须先停下来问**，不许自作主张推送；
+    * 遇到需要用户操作才能继续的阻塞项，**当轮就报告并停下**，不许自己找绕路方案往前跑。
+    - 被否决：把约定只写在这里（dev-trace）。否决原因是 trace 是流水账，
+      约定要放在 `AGENTS.md` 才会被下一轮读到。
+
+- 触及文件：
+  - 修改：`deploy/Caddyfile`（站点块 `https://...` → `https://...:8443`；
+    在文件头补上端口选择的理由与 `admin off` 与 reload 互斥的说明）
+  - 修改：`config.toml.example`（`[server].public_url` 与 `[tls].port` 改回 8443，
+    并写明"不要顺手改成 443"）
+  - 修改：`app/config.py`（`ServerConfig.public_url` 与 `TLSConfig.port` 默认值回 8443）
+  - 修改：`tests/_support.py`（测试配置仍用 `http://127.0.0.1:8000`，
+    目的是让"secure Cookie 只在 HTTPS 下加"这条逻辑可被两侧覆盖，并加了注释说明）
+  - 修改：`tests/test_config.py`（新增 3 条回归锁：代码默认值 / 模板 / Caddyfile 都必须用 8443）
+  - 修改：`AGENTS.md`（新增 §2 交互节奏；§5 部署约定写明 8443 与 `admin off` 的代价）
+  - 修改：`docs/decisions.md`（D-007 重写为"保持 8443"，并显式记录代价与三条锁定测试）
+
+- 执行过的命令与结果：
+  - 回退前先探测，确认 8443 当时是**拒绝**而不是被过滤：
+    `port 8443: ERROR ... "由于目标计算机积极拒绝，无法连接。"`、`port 8078: CONNECTED`、
+    `port 443: TIMEOUT`。说明 8443 的入站规则**是放行的**，只是我把 Caddy 搬走了。
+  - `uv run pytest -q -p no:cacheprovider` → 退出码 0：`180 passed, 1 skipped`。
+  - `caddy validate --config /etc/caddy/Caddyfile.new --adapter caddyfile` → `Valid configuration`。
+  - `systemctl restart caddy` → 退出码 0，`active`；
+    监听确认：`*:8443` 与 `*:80`（80 是 Caddy 的 auto-https 重定向监听，
+    入站被安全组挡住，不影响）。
+  - 本机带 SNI 自测：`curl --resolve ...:8443:127.0.0.1 https://...:8443/healthz`
+    → `code=502`（反代生效，应用未部署）；`openssl s_client -servername ...`
+    → TLSv1.3、`Peer certificate: CN = canisa1ph.duckdns.org`、`Verification: OK`。
+  - **外网端到端验证**（Node，因为本会话 PowerShell 的 schannel 建不了 TLS）：
+    ```
+    STATUS 502
+    CERT subject {"CN":"canisa1ph.duckdns.org"}
+    CERT valid_to Dec 12 12:28:24 2026 GMT
+    PROTOCOL TLSv1.3
+    ```
+    端口探测：`8443: CONNECTED`、`443: TIMEOUT (filtered)`、`80: TIMEOUT (filtered)`。
+
+- 观察到的现象 / 反直觉之处 / 踩坑：
+  - **反直觉**：TCP 连不上时"拒绝(REFUSED)"与"超时(TIMEOUT)"含义完全相反，
+    而两者在粗粒度的探测里都只是"连不上"。8443 在改端口前表现为**积极拒绝**
+    ——说明安全组**是放行的**，只是没有进程监听；443 表现为**超时**——说明是被过滤的。
+    只看"连不上"会把这两个完全不同的原因混为一谈。**排查端口要先区分拒绝与超时。**
+  - **反直觉**：本会话 PowerShell 的 `Invoke-WebRequest -SkipCertificateCheck`
+    也建不了 TLS（`The SSL connection could not be established`），
+    换 Node 立刻成功。这与旧项目 dev-notes 里的记录一致：本会话只有自带 TLS 的
+    运行时（Node / uv）能出网。**验证 HTTPS 要用 Node，不要用 PowerShell。**
+  - 我上一轮把 Caddy 搬到 443 之后**没有验证外网可达性就往下走了**，
+    直到用户指出才发现 443 本来就不通。教训：改对外端口这类改动，
+    **改完必须立刻从外部验证**，不能只看服务器本机自测。
+  - Caddy 在 `:443` 站点被撤掉后仍在监听 `*:80`。这是 auto-https 的重定向监听，
+    不是错误；入站被安全组挡住所以外网无影响。
+
+- 未决问题与下一步：
+  - `docs/decisions.md` D-007 现在是"保持 8443"，与 D-010 的编号顺序一致（D-007 < D-008）。
+  - 本地已有 4 个提交待推送，**等用户确认后再 push**（`3a3d3d1` 之后这一轮会再多一个）。
+  - 尚未写 `app/routers/*`：`main.py` 已引用它们，**当前应用还起不来**。
+    下一步按 tasks → auth → ingest/drafts → memories → courses → settings 补齐。
+  - 非标准端口下 Service Worker 作用域 / Cookie SameSite / 添加到主屏幕三项
+    仍需**真机确认**，这一步只能在应用部署后做。
+

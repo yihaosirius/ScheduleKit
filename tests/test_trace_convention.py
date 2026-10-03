@@ -188,6 +188,9 @@ def test_every_decision_records_rejected_alternatives() -> None:
     for block in blocks:
         title = block.split("\n", 1)[0].strip()
         assert "被否决" in block, f"决策「{title}」没有写被否决的替代方案"
-        # 写成 `**状态**：` 还是 `状态：` 都算数，这里只要求字段存在
-        assert re.search(r"\*{0,2}状态\*{0,2}：", block), f"决策「{title}」缺少状态标记"
-        assert re.search(r"\*{0,2}理由\*{0,2}：", block), f"决策「{title}」缺少理由"
+        # 写成 `**状态**：` / `状态：` 都算数；`**理由**（若干条约束）：` 这种
+        # "关键词 + 括号补充 + 冒号"的写法也算——所以在冒号前允许任意补充说明。
+        assert re.search(r"\*{0,2}状态\*{0,2}[^\n：]{0,40}：", block), (
+            f"决策「{title}」缺少状态标记"
+        )
+        assert re.search(r"\*{0,2}理由\*{0,2}[^\n：]{0,40}：", block), f"决策「{title}」缺少理由"

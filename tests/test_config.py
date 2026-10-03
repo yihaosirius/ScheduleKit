@@ -267,3 +267,43 @@ def test_example_config_parses_and_matches_defaults() -> None:
     assert doc["auth"]["secret_key"] == ""
     assert doc["llm"]["api_key"] == ""
     assert doc["tls"]["duckdns_token"] == ""
+
+
+# --------------------------------------------------------------------------- #
+# 端口决策的回归锁
+# --------------------------------------------------------------------------- #
+#: 站点端口是 8443 而不是 443，这是两条硬约束共同决定的，不是随手写的默认值：
+#:   1. 手机上已装好的快捷指令写死了 :8443，换端口要重新编辑并分发快捷指令；
+#:   2. 80/443 是备案相关端口，没有备案就不能用 443。
+#: 这两条测试的存在意义就是拦住"顺手改成 443"这种看起来很合理的改动。
+EXPECTED_SITE_PORT = 8443
+
+
+def test_code_defaults_use_site_port() -> None:
+    from app.config import ServerConfig, TLSConfig
+
+    assert TLSConfig().port == EXPECTED_SITE_PORT
+    assert ServerConfig().public_url.endswith(f":{EXPECTED_SITE_PORT}")
+
+
+def test_example_config_uses_site_port() -> None:
+    example = Path(__file__).resolve().parent.parent / "config.toml.example"
+    doc = tomlkit.parse(example.read_text(encoding="utf-8"))
+    assert doc["tls"]["port"] == EXPECTED_SITE_PORT
+    assert doc["server"]["public_url"].endswith(f":{EXPECTED_SITE_PORT}")
+
+
+def test_caddyfile_listens_on_site_port() -> None:
+    """Caddyfile 的站点地址必须与配置一致，否则证书与 Cookie 判断都会错。"""
+    caddyfile = Path(__file__).resolve().parent.parent / "deploy" / "Caddyfile"
+    text = caddyfile.read_text(encoding="utf-8")
+    assert f":{EXPECTED_SITE_PORT} {{" in text, (
+        f"deploy/Caddyfile 的站点块没有监听 :{EXPECTED_SITE_PORT}"
+    )
+    # 站点块必须显式写 https:// scheme：端口不是 443 时 Caddy 会按 HTTP 处理
+    assert f"https://canisa1ph.duckdns.org:{EXPECTED_SITE_PORT}" in text
+    # 不允许出现裸露的 443 站点块
+    assert "https://canisa1ph.duckdns.org {" not in text
+    # `admin off` 与 `caddy reload` 互斥，注释必须说明代价
+    assert "admin off" in text
+    assert "systemctl restart caddy" in text

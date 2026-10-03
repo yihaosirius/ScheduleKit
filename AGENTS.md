@@ -52,7 +52,22 @@ journalctl -u schedulekit | grep 't=8f3a2b1c'
 
 ---
 
-## 2. 代码约定
+## 2. 交互节奏（强制）
+
+### 2.1 `git push` 必须先停下来问
+
+**不要自作主张 push。** 需要推送时，先把当前状态说清楚（改了什么、测试结果、
+准备推送什么），然后**停下来等用户确认**再执行。原因：推送是对外可见的动作，
+用户需要有机会在它发生前看一眼；而本仓库是个人项目，用户习惯自己掌控推送节奏。
+
+### 2.2 阻塞项要立刻说，不要闷头绕
+
+遇到需要用户操作才能继续的事（放端口、给凭据、真机验证），
+**当轮就报告并停下**，不要自己找个绕路方案继续往前跑。
+
+---
+
+## 3. 代码约定
 
 - **分层**：`routers/` 只做鉴权与参数校验；业务规则全部落在 `services/`，使其可脱离 HTTP 单测。
 - **唯一配置**：`config.toml` 一处。不要在代码里散落 `os.environ` 读取（`config.py` 里的
@@ -64,7 +79,7 @@ journalctl -u schedulekit | grep 't=8f3a2b1c'
 - **不静默降级**：任何通道/协议降级都要落库（`llm_path`）+ 日志 WARNING + 在 UI 上标出来。
 - **密钥不进日志**：`kv()` 自动屏蔽含 `key`/`token`/`password`/`secret`/`cookie` 的字段。
 
-## 3. 测试约定
+## 4. 测试约定
 
 ```bash
 uv run pytest -q -p no:cacheprovider
@@ -73,9 +88,14 @@ uv run pytest -q -p no:cacheprovider
 `-p no:cacheprovider` 是**必须**的：沙箱里 `.pytest_cache` 目录建不出来。
 测试不得访问网络（用 `app/llm/mock.py`）。
 
-## 4. 部署约定
+## 5. 部署约定
 
 - 服务器：`116.62.52.66`（Ubuntu 24.04），域名 `canisa1ph.duckdns.org`。
-- 应用只监听 `127.0.0.1:8000`，对外一律经 Caddy（`:443`）。
+- 应用只监听 `127.0.0.1:8000`，对外一律经 Caddy（**`:8443`**）。
+- **端口是 8443，不是 443，不要"顺手改成 443"**：80/443 是备案相关端口，
+  而且手机上已装好的快捷指令写死了 `:8443`。详见 `docs/decisions.md` D-007，
+  并有 `tests/test_config.py` 的三条测试锁住这个选择。
+- Caddyfile 里 `admin off` 与 `caddy reload` 互斥（reload 走 :2019 管理端点）：
+  改配置后必须 `systemctl restart caddy`。
 - 只动 ScheduleKit 自己的资源；**不动** cloudreve / postgres / redis / portainer /
   `caddy-webdav.service` 以及它们的端口（8078 / 8001 / 6888 / 8079）。

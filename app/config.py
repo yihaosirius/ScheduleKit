@@ -48,7 +48,9 @@ class ConfigError(RuntimeError):
 # --------------------------------------------------------------------------- #
 @dataclass
 class ServerConfig:
-    public_url: str = "http://127.0.0.1:8000"
+    #: 默认值刻意带 :8443 —— 见 config.toml.example 里的说明：
+    #: 已装好的快捷指令写死了这个端口，而 80/443 涉及备案。
+    public_url: str = "https://canisa1ph.duckdns.org:8443"
     timezone: str = "Asia/Shanghai"
     listen_host: str = "127.0.0.1"
     listen_port: int = 8000
@@ -110,7 +112,8 @@ class IngestConfig:
 class TLSConfig:
     provider: str = "duckdns"
     domain: str = "canisa1ph.duckdns.org"
-    port: int = 443
+    #: 8443 而非 443：备案要求 + 已有快捷指令。见 config.toml.example。
+    port: int = 8443
     acme_email: str = ""
     duckdns_token: str = ""
     cert_dir: str = "/etc/schedulekit-tls"

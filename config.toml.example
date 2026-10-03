@@ -18,7 +18,12 @@
 
 [server]
 # 对外访问地址，用于生成确认页绝对链接等。必须与 Caddy 的对外地址一致。
-public_url  = "https://canisa1ph.duckdns.org"
+#
+# 端口是 **8443**，不是 443。理由有两条硬约束：
+#   1. 手机上已装好的快捷指令写的就是 :8443，换端口要重新编辑并分发快捷指令；
+#   2. 80/443 是备案相关端口，没有备案就不能用。8443 绕开了这个问题。
+# **不要"顺手改成 443"。**
+public_url  = "https://canisa1ph.duckdns.org:8443"
 # 时区。同时作为 LLM 返回"无时区时间"时的解释基准。
 timezone    = "Asia/Shanghai"
 # uvicorn 仅监听回环，对外一律经 Caddy 反代。生产环境不要改成 0.0.0.0。
@@ -113,7 +118,8 @@ memory_char_budget = 2000
 # 仅部署脚本读取，应用本身不加载本段。
 provider      = "duckdns"                    # duckdns | manual
 domain        = "canisa1ph.duckdns.org"
-port          = 443
+# 8443：备案与已有快捷指令两条约束决定的，改之前先读 [server].public_url 的注释。
+port          = 8443
 acme_email    = ""
 duckdns_token = ""
 cert_dir      = "/etc/schedulekit-tls"

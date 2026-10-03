@@ -3,19 +3,28 @@
 # 本文件由 deploy/install.sh 从 config.toml 渲染生成，也可以手工维护——
 # 但**不要**在里面写死 token / 密码：那是 config.toml 的职责。
 #
-# 与上一版的差异（重写时刻意调整）：
-#   * 站点从 :8443 改到标准 :443。自建 PWA 走非常规端口会踩到
-#     「添加到主屏幕」「Service Worker 作用域」「Cookie SameSite」三处坑，
-#     而 443 现在没有别的服务占用。
-#   * 证书目录从 /etc/schedulekit/certs 迁到 /etc/schedulekit-tls。
-#     原因是旧证书目录的属主是已删除的 schedulekit 用户，而 Caddy 需要读
-#     私钥；把证书与「应用要写的配置目录」彻底分开，权限模型才自洽
-#     （/etc/schedulekit 属应用、/etc/schedulekit-tls 属 root:caddy）。
-#   * 仍然用显式 tls <证书路径> 而不是让 Caddy 自动 ACME —— 证书由 acme.sh
-#     走 DNS-01 签发，不需要 80/443 入站做 HTTP-01，也就不触发大陆备案条件。
+# 端口选择（重要，不要"顺手改成 443"）：
+#   * 站点跑在 **:8443**。原因有两条，都是硬约束：
+#     1. 手机上已装好的快捷指令写的是 :8443，换端口要重新编辑并分发快捷指令；
+#     2. 80/443 是备案相关端口。用 8443 就绕开了备案要求，
+#        改用 443 会重新引入这个问题。**没有备案就不能碰 443。**
+#   * 因此 Caddyfile 里必须显式写 `https://` scheme，否则 Caddy 会因为端口不是
+#     443 而按 HTTP 处理（见 https://caddyserver.com/docs/caddyfile/concepts#addresses）。
+#   * 已知限制：非标准端口下 Service Worker 作用域、Cookie SameSite、以及
+#     "添加到主屏幕"的行为都与 443 不同，实测需在真机确认（见 docs/dev-trace.md）。
+#
+# 证书目录从 /etc/schedulekit/certs 迁到 /etc/schedulekit-tls：
+# 旧证书目录的属主是已删除的 schedulekit 用户，而 Caddy 需要读私钥；
+# 把证书与"应用要写的配置目录"彻底分开，权限模型才自洽
+# （/etc/schedulekit 属应用、/etc/schedulekit-tls 属 root:caddy）。
 
 {
-	# 关掉管理端点，单机不需要
+	# 关掉管理端点，单机不需要。
+	#
+	# ⚠️ 代价：`caddy reload` 走的就是 :2019 管理端点，关掉之后
+	# **`systemctl reload caddy` 一定失败**，报
+	#   `dial tcp 127.0.0.1:2019: connect: connection refused`
+	# 改配置后请用 `systemctl restart caddy`。
 	admin off
 
 	# 日志写 stdout，由 systemd 收进 journald。
@@ -31,7 +40,7 @@
 	}
 }
 
-https://canisa1ph.duckdns.org {
+https://canisa1ph.duckdns.org:8443 {
 	tls /etc/schedulekit-tls/fullchain.pem /etc/schedulekit-tls/privkey.pem
 
 	encode zstd gzip

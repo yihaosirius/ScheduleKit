@@ -30,6 +30,8 @@ VALID_PASSWORD_HASH = (
 CONFIG_TEMPLATE = """\
 # 测试配置。注释存在的意义是验证写回时不会把注释吃掉。
 [server]
+# 测试里刻意用 http://127.0.0.1 —— 生产是 https 的 :8443，
+# 这里用 http 是为了让 "secure Cookie 只在 HTTPS 下加" 这条逻辑可被两侧覆盖。
 public_url  = "http://127.0.0.1:8000"
 timezone    = "{tz}"
 listen_host = "127.0.0.1"
