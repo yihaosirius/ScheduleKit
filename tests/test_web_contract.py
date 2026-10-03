@@ -125,6 +125,105 @@ def test_sticky_action_bar_clears_the_dock() -> None:
     )
 
 
+def test_home_tiles_ordered_and_unordered_on_desktop() -> None:
+    """PC（≥900px）上有序表与无序表要**平铺并排**，而不是标签切换。
+
+    这条是用户明确要求的布局：PC 端不用标签，两列直接铺开。
+    实现方式是"同一份 DOM + 断点切换 grid/flex"，所以这里断言的是
+    *两份列结构都在 DOM 里*，并靠 CSS 在移动端隐藏其一。
+    如果哪天有人改成 `v-if="desktop"` 渲染两套模板，这条测试会提醒他
+    那种做法会让逻辑分叉（改一处忘另一处）。
+    """
+    text = (SRC / "pages" / "HomePage.vue").read_text(encoding="utf-8")
+
+    # 两份列结构都在（不是按 desktop 条件渲染）
+    assert 'data-col="ordered"' in text
+    assert 'data-col="unordered"' in text
+
+    # 移动端靠显隐切换，而不是 v-if 掉整个列
+    assert "col--hidden-mobile" in text
+
+    # PC 断点必须是 grid 两列。媒体查询后面还有别的内容，
+    # 所以不能用 `\}\s*$` 去锚定文件末尾——只截到该块结束即可。
+    media = re.search(r"@media \(min-width: 900px\)\s*\{(.*?)\n\}", text, flags=re.DOTALL)
+    assert media is not None, "找不到 PC 断点"
+    body = media.group(1)
+    assert "grid-template-columns: 1fr 1fr" in body, "PC 上两列必须并排平铺"
+
+
+def test_home_has_no_done_tab() -> None:
+    """「已完成」不能是个标签页 —— 它改成了下方可展开区。
+
+    如果标签列表里又冒出第三个 'done'，说明有人只改了标签没改折叠区，
+    结果会出现"点了标签、下面还有一块可展开"的重复。
+    """
+    text = (SRC / "pages" / "HomePage.vue").read_text(encoding="utf-8")
+    tabs = text[text.index("const TABS"):text.index("const TABS") + 400]
+    assert "'ordered'" in tabs and "'unordered'" in tabs
+    assert "'done'" not in tabs, "已完成不该出现在标签里"
+
+
+def test_done_section_is_collapsible_and_collapsed_by_default() -> None:
+    """已完成必须是可展开的，且默认收起。"""
+    home = (SRC / "pages" / "HomePage.vue").read_text(encoding="utf-8")
+    assert "CollapsibleSection" in home
+    assert 'title="已完成"' in home
+    assert "@expand=" in home, "展开时才去拉数据（默认收起时不该请求）"
+
+    section = (SRC / "components" / "CollapsibleSection.vue").read_text(encoding="utf-8")
+    assert "const open = ref(false)" in section, "默认必须是收起状态"
+    # 高度动画用 grid-template-rows（0fr→1fr），不用猜 max-height
+    assert "grid-template-rows: 0fr" in section
+    assert "grid-template-rows: 1fr" in section
+
+    # 只在**样式块**里检查 max-height —— 文件头的文档里会提到这个词
+    # （解释为什么不用它），按整文件搜会把注释误判成实现。
+    style = re.search(r"<style scoped>(.*?)</style>", section, flags=re.DOTALL)
+    assert style is not None, "找不到样式块"
+    css = style.group(1)
+    # 去掉 CSS 注释后再查，否则注释里的说明也会命中
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    assert "max-height" not in css, (
+        "用 max-height 做展开动画需要猜一个上限：猜小了下拉不到位，"
+        "猜大了动画会提前结束，看起来像卡顿"
+    )
+
+
+def test_desktop_detection_uses_matchmedia() -> None:
+    """断点判定要用 matchMedia，而不是自己监听 resize 再量宽度。
+
+    matchMedia 能在跨过断点时被动收到回调（包括窗口拖动、
+    以及某些浏览器里"缩放级别变化"触发的情况），不必自己重算与去抖。
+    """
+    text = (SRC / "pages" / "HomePage.vue").read_text(encoding="utf-8")
+    assert "window.matchMedia('(min-width: 900px)')" in text
+    assert "addEventListener('change'" in text
+
+
+def test_loads_all_views_only_on_desktop() -> None:
+    """只有平铺布局才一次拉三个视图；移动端一次拉一个。
+
+    否则移动端会白白多两次请求——而它在标签版里只看得到其中一个，
+    已完成那节默认还收起。
+    """
+    text = (SRC / "state" / "store.ts").read_text(encoding="utf-8")
+    assert "Promise.all(" in text, "loadTasks('all') 要并行拉三个视图"
+    home = (SRC / "pages" / "HomePage.vue").read_text(encoding="utf-8")
+    assert "loadTasks(desktop.value ? 'all' : tab.value)" in home
+
+
+def test_done_toggle_updates_counts_locally() -> None:
+    """勾选完成后本地要立刻同步列表与计数。
+
+    等重新拉取才更新会让用户看到"点了但没反应"的那一帧；
+    而完全不更新计数会让角标长期不准。
+    """
+    text = (SRC / "state" / "store.ts").read_text(encoding="utf-8")
+    assert "dropLocal" in text
+    assert "insertLocal" in text
+    assert "refreshCounts" in text
+
+
 def test_priority_labels_match_backend() -> None:
     """优先级文案必须与后端 system prompt 里的说明一致。"""
     client = (SRC / "api" / "client.ts").read_text(encoding="utf-8")

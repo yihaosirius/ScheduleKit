@@ -1,53 +1,72 @@
 <script setup lang="ts">
 /**
- * 首页：有序表 / 无序表 / 已完成三个视图。
+ * 首页。
  *
- * 分栏用**分段控件 + 滑动指示器**而不是两个按钮：滑动的小块让切换有方向感
- * （从"有序"到"无序"是往右滑），这是需求里"注重交互动画"落到实处的第一处。
+ * **同一份 DOM，两种结构**，靠媒体查询切换（而不是渲染两套模板）：
  *
- * 三个视图的权重差异是刻意的：
- *   * 有序表：卡片式，间距大，一屏 4–5 条
- *   * 无序表：按 Ⅰ–Ⅴ 分组，行式，一屏 8–10 条
- *   * 已完成：折叠在最后，默认收起
+ *   移动端（< 900px）：顶部标签切「有序表 / 无序表」，一次只显示一列
+ *   PC（≥ 900px）    ：有序表与无序表**平铺并排**，没有标签
+ *
+ * 为什么坚持一份 DOM：两套模板意味着两处要同步改，而它们必然会分叉
+ * （改了一处忘了另一处，表现是"手机上好了、电脑上还是旧的"）。
+ * 这里用 CSS 控制"显示哪些列、怎么排"，逻辑只有一份。
+ *
+ * 「已完成」在两种布局下都是**下方可展开、默认收起**：
+ *   * 它不是待办，占主视野没有收益；
+ *   * 但它会一直增长，平铺成第三列会把有序表挤得很难看。
+ * 默认收起还有一个好处：不必为看不见的列表发请求（展开时才拉）。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import TaskCard from '@/components/TaskCard.vue'
 import TaskComposer from '@/components/TaskComposer.vue'
+import CollapsibleSection from '@/components/CollapsibleSection.vue'
 import { PRIORITY_HINTS, PRIORITY_LABELS } from '@/api/client'
-import { deleteTask, loadTasks, state, toggleTask } from '@/state/store'
+import {
+  deleteTask,
+  doneTasks,
+  groupByPriority,
+  isLoaded,
+  loadTasks,
+  orderedTasks,
+  state,
+  toggleTask,
+} from '@/state/store'
 
 const composer = ref<InstanceType<typeof TaskComposer> | null>(null)
 
-type Tab = 'ordered' | 'unordered' | 'done'
+/** 移动端标签的两个视图（已完成不在标签里，见文件头说明） */
+type Tab = 'ordered' | 'unordered'
 
 const tab = ref<Tab>('ordered')
 const segRef = ref<HTMLElement | null>(null)
 const segIndicator = ref({ left: 0, width: 0, ready: false })
 
-const TABS: Array<{ key: Tab; label: string }> = [
-  { key: 'ordered', label: '有序表' },
-  { key: 'unordered', label: '无序表' },
-  { key: 'done', label: '已完成' },
+const TABS: Array<{ key: Tab; label: string; count: () => number }> = [
+  { key: 'ordered', label: '有序表', count: () => state.counts.ordered ?? 0 },
+  { key: 'unordered', label: '无序表', count: () => state.counts.unordered ?? 0 },
 ]
 
-const tasks = computed(() => state.tasks)
+const ordered = computed(() => orderedTasks.value)
+const unordered = computed(() => state.lists.unordered)
+const done = computed(() => doneTasks.value)
+const unorderedGroups = computed(() => groupByPriority(unordered.value))
 
-/** 无序表按优先级分组。分组数据来自服务端已排好序的列表，这里只做归类。 */
-const groups = computed(() => {
-  const map = new Map<number, typeof tasks.value>()
-  for (const task of tasks.value) {
-    if (task.priority === null) continue
-    const bucket = map.get(task.priority) ?? []
-    bucket.push(task)
-    map.set(task.priority, bucket)
-  }
-  return [...map.entries()]
-    .map(([priority, items]) => ({ priority, items }))
-    .sort((a, b) => a.priority - b.priority)
-})
+/**
+ * 是否 PC。用 `matchMedia` 而不是量窗口宽度：它能在跨过断点时**被动收到变化**
+ * （例如把窗口拖窄），而不需要自己监听 resize 再算一遍。
+ */
+const desktop = ref(false)
+let media: MediaQueryList | null = null
 
 async function refresh(): Promise<void> {
-  await loadTasks(tab.value)
+  // 平铺要两列都填满（已完成留到展开时）；标签版只拉当前那个。
+  // 这就是"PC 一次拉三个、移动端一次拉一个"的取舍落点。
+  await loadTasks(desktop.value ? 'all' : tab.value)
+}
+
+async function ensureDoneLoaded(): Promise<void> {
+  if (isLoaded('done')) return
+  await loadTasks('done')
 }
 
 async function moveIndicator(): Promise<void> {
@@ -59,49 +78,48 @@ async function moveIndicator(): Promise<void> {
   segIndicator.value = { left: target.offsetLeft, width: target.offsetWidth, ready: true }
 }
 
-watch(tab, async () => {
-  await refresh()
+async function onTabChange(key: Tab): Promise<void> {
+  tab.value = key
+  if (!isLoaded(key)) await loadTasks(key)
   await moveIndicator()
-})
-
-watch(() => state.counts, moveIndicator, { deep: true })
-
-onMounted(async () => {
-  await refresh()
-  await moveIndicator()
-})
+}
 
 async function onToggle(id: number): Promise<void> {
-  const updated = await toggleTask(id)
-  if (updated && tab.value === 'done') await refresh()
+  await toggleTask(id)
 }
 
 async function onRemove(id: number): Promise<void> {
   await deleteTask(id)
 }
 
-/** 空状态的文案要指出**下一步做什么**，而不是只说"没有数据" */
-const emptyHint = computed(() => {
-  if (tab.value === 'ordered') {
-    return {
-      title: '没有带截止时间的任务',
-      body: '点右下角的 ＋ 添加，或用 iPhone 快捷指令拍一张作业截图。',
-    }
-  }
-  if (tab.value === 'unordered') {
-    return {
-      title: '没有按优先级排的任务',
-      body: '没有明确截止时间的事情放这里，按 Ⅰ–Ⅴ 分档。',
-    }
-  }
-  return { title: '还没有完成的任务', body: '勾选完成后会出现在这里。' }
+onMounted(async () => {
+  media = window.matchMedia('(min-width: 900px)')
+  desktop.value = media.matches
+  // 跨过断点时按新布局重新拉一次（标签版切平铺版需要补齐另一列）
+  media.addEventListener('change', (event) => {
+    desktop.value = event.matches
+    void refresh().then(moveIndicator)
+  })
+
+  await refresh()
+  await moveIndicator()
 })
+
+const orderedEmpty = {
+  title: '没有带截止时间的任务',
+  body: '点右下角的 ＋ 添加，或用 iPhone 快捷指令拍一张作业截图。',
+}
+const unorderedEmpty = {
+  title: '没有按优先级排的任务',
+  body: '没有明确截止时间的事情放这里，按 Ⅰ–Ⅴ 分档。',
+}
 </script>
 
 <template>
-  <div class="home">
-    <!-- 分段控件 -->
-    <div ref="segRef" class="seg" role="tablist" aria-label="任务视图">
+  <div class="home" :class="{ 'home--tiled': desktop }">
+    <!-- 标签：只有移动端有。PC 平铺时两列本身就是"选择"，
+         再加标签会出现"点了标签但内容没变"的迷惑。 -->
+    <div v-if="!desktop" ref="segRef" class="seg" role="tablist" aria-label="任务视图">
       <span
         class="seg__indicator"
         :class="{ 'seg__indicator--ready': segIndicator.ready }"
@@ -120,40 +138,58 @@ const emptyHint = computed(() => {
         type="button"
         role="tab"
         :aria-selected="tab === item.key"
-        @click="tab = item.key"
+        @click="onTabChange(item.key)"
       >
         {{ item.label }}
-        <span v-if="item.key === 'ordered'" class="seg__count">{{ state.counts.ordered ?? 0 }}</span>
-        <span v-else-if="item.key === 'unordered'" class="seg__count">
-          {{ state.counts.unordered ?? 0 }}
-        </span>
-        <span v-else class="seg__count">{{ state.counts.done ?? 0 }}</span>
+        <span class="seg__count">{{ item.count() }}</span>
       </button>
     </div>
 
-    <!-- 有序表 -->
-    <template v-if="tab === 'ordered'">
-      <TransitionGroup v-if="tasks.length" name="list" tag="div" class="stack">
-        <TaskCard
-          v-for="task in tasks"
-          :key="task.id"
-          :task="task"
-          @toggle="onToggle"
-          @remove="onRemove"
-        />
-      </TransitionGroup>
-      <div v-else class="empty">
-        <div class="empty__mark" aria-hidden="true">✓</div>
-        <h3>{{ emptyHint.title }}</h3>
-        <p>{{ emptyHint.body }}</p>
-      </div>
-    </template>
+    <div class="home__body">
+      <!-- ── 有序表 ─────────────────────────────────────────────── -->
+      <section
+        class="col col--ordered"
+        :class="{ 'col--hidden-mobile': tab !== 'ordered' }"
+        data-col="ordered"
+        aria-label="有序表"
+      >
+        <header class="col__head">
+          <h2 class="col__title">有序表</h2>
+          <span class="col__sub">按截止时间</span>
+          <span class="col__count">{{ state.counts.ordered ?? 0 }}</span>
+        </header>
 
-    <!-- 无序表：按档位分组 -->
-    <template v-else-if="tab === 'unordered'">
-      <div v-if="groups.length" class="groups">
-        <TransitionGroup name="group">
-          <section v-for="group in groups" :key="group.priority" class="group">
+        <TransitionGroup v-if="ordered.length" name="list" tag="div" class="stack">
+          <TaskCard
+            v-for="task in ordered"
+            :key="task.id"
+            :task="task"
+            @toggle="onToggle"
+            @remove="onRemove"
+          />
+        </TransitionGroup>
+        <div v-else class="empty">
+          <div class="empty__mark" aria-hidden="true">✓</div>
+          <h3>{{ orderedEmpty.title }}</h3>
+          <p>{{ orderedEmpty.body }}</p>
+        </div>
+      </section>
+
+      <!-- ── 无序表 ─────────────────────────────────────────────── -->
+      <section
+        class="col col--unordered"
+        :class="{ 'col--hidden-mobile': tab !== 'unordered' }"
+        data-col="unordered"
+        aria-label="无序表"
+      >
+        <header class="col__head">
+          <h2 class="col__title">无序表</h2>
+          <span class="col__sub">按优先级</span>
+          <span class="col__count">{{ state.counts.unordered ?? 0 }}</span>
+        </header>
+
+        <div v-if="unorderedGroups.length" class="groups">
+          <section v-for="group in unorderedGroups" :key="group.priority" class="group">
             <header class="group__head">
               <span class="group__badge" :data-p="group.priority">
                 {{ PRIORITY_LABELS[group.priority] }}
@@ -161,7 +197,7 @@ const emptyHint = computed(() => {
               <span class="group__hint">{{ PRIORITY_HINTS[group.priority] }}</span>
               <span class="group__count">{{ group.items.length }}</span>
             </header>
-            <TransitionGroup name="list" tag="div" class="group__body">
+            <div class="group__body">
               <TaskCard
                 v-for="task in group.items"
                 :key="task.id"
@@ -170,35 +206,38 @@ const emptyHint = computed(() => {
                 @toggle="onToggle"
                 @remove="onRemove"
               />
-            </TransitionGroup>
+            </div>
           </section>
-        </TransitionGroup>
-      </div>
-      <div v-else class="empty">
-        <div class="empty__mark" aria-hidden="true">❖</div>
-        <h3>{{ emptyHint.title }}</h3>
-        <p>{{ emptyHint.body }}</p>
-      </div>
-    </template>
+        </div>
+        <div v-else class="empty">
+          <div class="empty__mark" aria-hidden="true">❖</div>
+          <h3>{{ unorderedEmpty.title }}</h3>
+          <p>{{ unorderedEmpty.body }}</p>
+        </div>
+      </section>
+    </div>
 
-    <!-- 已完成 -->
-    <template v-else>
-      <TransitionGroup v-if="tasks.length" name="list" tag="div" class="stack">
-        <TaskCard
-          v-for="task in tasks"
-          :key="task.id"
-          :task="task"
-          compact
-          @toggle="onToggle"
-          @remove="onRemove"
-        />
-      </TransitionGroup>
-      <div v-else class="empty">
-        <div class="empty__mark" aria-hidden="true">◷</div>
-        <h3>{{ emptyHint.title }}</h3>
-        <p>{{ emptyHint.body }}</p>
+    <!-- ── 已完成：两种布局都在下方，默认收起 ──────────────────── -->
+    <CollapsibleSection
+      title="已完成"
+      :count="state.counts.done ?? 0"
+      :loaded="isLoaded('done')"
+      @expand="ensureDoneLoaded"
+    >
+      <div class="done-wrap">
+        <TransitionGroup v-if="done.length" name="list" tag="div" class="done-list">
+          <TaskCard
+            v-for="task in done"
+            :key="task.id"
+            :task="task"
+            compact
+            @toggle="onToggle"
+            @remove="onRemove"
+          />
+        </TransitionGroup>
+        <p v-else class="done-empty">还没有完成的任务。勾选完成后会出现在这里。</p>
       </div>
-    </template>
+    </CollapsibleSection>
 
     <TaskComposer ref="composer" @created="refresh" />
   </div>
@@ -209,11 +248,11 @@ const emptyHint = computed(() => {
   padding: 12px 12px 0;
 }
 
-/* ── 分段控件 ───────────────────────────────────────────────── */
+/* ── 标签（移动端） ─────────────────────────────────────────── */
 .seg {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 2px;
   padding: 3px;
   margin-bottom: 14px;
@@ -268,7 +307,46 @@ const emptyHint = computed(() => {
   line-height: 16px;
 }
 
-/* ── 列表 ───────────────────────────────────────────────────── */
+/* ── 列 ─────────────────────────────────────────────────────── */
+.home__body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* 移动端：不是当前标签的那一列直接不渲染。
+   用 display:none 而不是 visibility/opacity —— 后两者仍参与布局，会留下空白。 */
+.col--hidden-mobile {
+  display: none;
+}
+
+.col__head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+
+.col__title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.col__sub {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.col__count {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
 .stack {
   position: relative;
   display: flex;
@@ -324,11 +402,30 @@ const emptyHint = computed(() => {
 }
 
 .group__body {
-  position: relative;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+}
+
+/* ── 已完成 ─────────────────────────────────────────────────── */
+.done-wrap {
+  padding: 6px 0 2px;
+}
+
+.done-list {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.done-empty {
+  margin: 0;
+  padding: 14px 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
 }
 
 /* ── 空状态 ─────────────────────────────────────────────────── */
@@ -337,7 +434,7 @@ const emptyHint = computed(() => {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 56px 24px;
+  padding: 44px 24px;
   color: var(--text-tertiary);
 }
 
@@ -365,22 +462,39 @@ const emptyHint = computed(() => {
   line-height: 1.6;
 }
 
-/* 分组自身的进出场 */
-.group-enter-active,
-.group-leave-active {
-  transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease);
-}
-.group-enter-from,
-.group-leave-to {
-  opacity: 0;
-  transform: translateY(-4px);
-}
-
+/* ── PC：平铺 ───────────────────────────────────────────────── */
 @media (min-width: 900px) {
   .home {
-    padding: 20px 28px 0;
-    max-width: 760px;
+    padding: 20px 28px 24px;
+    max-width: 1180px;
     margin: 0 auto;
+  }
+
+  /* 有序表与无序表并排平铺；已完成不在这行里（它在下方折叠区） */
+  .home__body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 22px;
+    align-items: start;
+  }
+
+  /* PC 上两列都要显示（标签不存在，这个类不会命中，但显式写出来更清楚） */
+  .col--hidden-mobile {
+    display: block;
+  }
+
+  /* 平铺时列头是必要信息（标签没了） */
+  .col__title {
+    font-size: 13px;
+  }
+
+  /* 每列各自独立滚动：某一列很长时不该把整页撑开，
+     否则另一列会跟着滚走，"左右对照"就失效了。 */
+  .stack,
+  .groups {
+    max-height: calc(100vh - var(--header-h) - 168px);
+    overflow-y: auto;
+    padding-right: 2px;
   }
 }
 </style>
