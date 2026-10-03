@@ -62,18 +62,18 @@ https://__DOMAIN__:__SITE_PORT__ {
 		header_up X-Real-IP {remote_host}
 	}
 
-	# 带哈希指纹的静态资源可以长缓存（Vite 产物的文件名含内容哈希）
-	@immutable path /assets/* /static/spa/assets/*
-	header @immutable Cache-Control "public, max-age=31536000, immutable"
-
-	# Service Worker 与 manifest 绝不能长缓存：改了 sw.js 却拿不到新版，
-	# 是 PWA 最难排查的一类问题。
-	@nocache path /sw.js /manifest.webmanifest
-	header @nocache Cache-Control "no-cache"
-
-	# index.html 同理，必须每次回源，否则用户会看到旧的 SPA 外壳。
-	@shell path / /index.html
-	header @shell Cache-Control "no-cache"
+	# ── 缓存策略：**由应用独占**，Caddy 在这里不设 Cache-Control ────────────
+	# 曾经两边都设，结果是响应里出现**两个** cache-control 头（实测 `/`、
+	# `/sw.js`、`/manifest.webmanifest` 都返回 `no-cache, no-cache`）。
+	# 一个头两个来源只有一个后果：以后改策略时必然只改一半。
+	#
+	# 为什么交给应用：
+	#   * 它知道 `/sw.js`、`/manifest.webmanifest`、SPA 外壳、带哈希资源
+	#     各自该用什么策略，这些知识已经在 app/routers/ui.py 里；
+	#   * 开发时（不走 Caddy）与生产行为一致，少一类"本地好好的"问题。
+	#
+	# 具体的策略见 app/routers/ui.py：外壳/sw/manifest 用 no-cache，
+	# /assets/* 用 immutable（文件名含内容哈希），图标用长 max-age。
 
 	# 健康检查不打日志，免得刷屏
 	@health path /healthz

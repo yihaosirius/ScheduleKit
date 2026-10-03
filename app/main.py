@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Config, load_config
@@ -228,9 +229,29 @@ def _install_error_handlers(app: FastAPI) -> None:
         return JSONResponse({"detail": detail, "trace_id": trace_id}, status_code=422)
 
 
-def _install_routes(app: FastAPI, cfg: Config) -> None:
-    from fastapi.staticfiles import StaticFiles
+class _CachedStaticFiles(StaticFiles):
+    """给挂载的静态目录统一加一个 ``Cache-Control``。
 
+    为什么需要一个小类：``StaticFiles`` 默认不带任何缓存头，
+    于是浏览器只能按自己的启发式规则猜。图标（文件名无哈希）会被反复回源；
+    而带哈希的产物又拿不到"可以放心长缓存"的指示。
+    在挂载点上一次性声明，比在 Caddy 里再写一遍规则更好——
+    后者会让同一个头有两个来源（这个坑已经踩过一次）。
+    """
+
+    def __init__(self, *, cache_control: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._cache_control = cache_control
+
+    async def get_response(self, path: str, scope: Any) -> Response:  # noqa: ANN401
+        response = await super().get_response(path, scope)
+        # 只给成功响应加：404 被缓存住会让"之后补上文件"永远看不到
+        if response.status_code == 200:
+            response.headers.setdefault("Cache-Control", self._cache_control)
+        return response
+
+
+def _install_routes(app: FastAPI, cfg: Config) -> None:
     from app.routers import auth as auth_router
     from app.routers import courses as courses_router
     from app.routers import drafts as drafts_router
@@ -242,22 +263,41 @@ def _install_routes(app: FastAPI, cfg: Config) -> None:
 
     # 静态资源：图标与 Vite 产物。
     #
-    # `/static/spa/` 必须挂载：Vite 产物的 `index.html` 里引用的是
-    # `/assets/...`（绝对路径），但**页面路由可能是深层 hash 路由**——
-    # 只要引用是绝对的，`/assets/` 也能被下面的 mount 命中，所以产物与图标
-    # 用两个挂载点分别暴露，语义更清楚：
-    #   /static/icons/...  → 手工维护的图标
-    #   /static/spa/...    → 构建产物
-    #   /assets/...        → 同上（Vite 默认的产物引用路径）
+    # **缓存策略只在这里（以及 app/routers/ui.py）定义，Caddy 不插手。**
+    # 曾经两边都设，实测同一个响应里出现了两个 cache-control 头
+    # （`/`、`/sw.js`、`/manifest.webmanifest` 都是 `no-cache, no-cache`）。
+    # 一个头有两个来源，唯一的后果是以后改策略时只改一半。
+    #
+    #   /static/icons/...  → 图标，内容稳定但文件名无哈希 → 长 max-age
+    #   /static/...        → 其余静态文件（sw.js 由路由单独处理）
+    #   /assets/...        → 产物，文件名含内容哈希 → immutable
     static_dir = Path(__file__).resolve().parent / "static"
     if static_dir.exists():
+        icons_dir = static_dir / "icons"
+        if icons_dir.exists():
+            app.mount(
+                "/static/icons",
+                _CachedStaticFiles(
+                    directory=icons_dir,
+                    # 一年。换图标时改名（图标本来就是低频资产）。
+                    cache_control="public, max-age=31536000",
+                ),
+                name="icons",
+            )
         app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
     spa_dir = static_dir / "spa"
     assets_dir = spa_dir / "assets"
     if assets_dir.exists():
-        # 带内容哈希，可以长缓存；Caddy 侧也有同样的规则（双层保险不冲突）
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        app.mount(
+            "/assets",
+            _CachedStaticFiles(
+                directory=assets_dir,
+                # 内容变则文件名变（Vite 的哈希），所以可以永久缓存
+                cache_control="public, max-age=31536000, immutable",
+            ),
+            name="assets",
+        )
 
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:

@@ -122,6 +122,67 @@ async def test_spa_index_is_served_when_built(anon) -> None:
         assert "前端尚未构建" in response.text
 
 
+async def test_cache_headers_have_exactly_one_owner(anon) -> None:
+    """缓存头只能有一个来源，且不能是逗号拼接的。
+
+    这条测试的由来：应用和 Caddy **都**设了 Cache-Control，于是真实响应里出现了
+    **两个**同名头（实测 `/`、`/sw.js`、`/manifest.webmanifest` 都返回
+    `no-cache, no-cache`）；而图标又**一个都没有**（StaticFiles 默认不设，
+    浏览器只能按启发式猜）。
+
+    一个响应头有两个来源只有一个后果：以后改策略时必然只改一半。
+    """
+    for path, expected in (
+        ("/", "no-cache"),
+        ("/sw.js", "no-cache"),
+        ("/manifest.webmanifest", "no-cache"),
+    ):
+        response = await anon.get(path)
+        value = response.headers.get("cache-control")
+        assert value is not None, f"{path} 没有 Cache-Control"
+        assert expected in value, f"{path} 的 Cache-Control 不含 {expected!r}：{value!r}"
+        assert "," not in value, (
+            f"{path} 的 Cache-Control 是拼接值 {value!r} —— 说明不止一个来源在设它"
+        )
+
+
+async def test_icons_have_long_cache(anon) -> None:
+    """图标必须有缓存策略。
+
+    StaticFiles 默认不设 Cache-Control，于是图标每次都被重新请求。
+    图标是低频资产，给长 max-age 即可（换图标时改名）。
+    """
+    response = await anon.get("/static/icons/icon-192.png")
+    assert response.status_code == 200
+    value = response.headers.get("cache-control") or ""
+    assert "max-age" in value, f"图标没有 max-age：{value!r}"
+
+
+async def test_hashed_assets_are_immutable(anon) -> None:
+    """带内容哈希的产物可以 immutable。"""
+    spa = Path(__file__).resolve().parent.parent / "app" / "static" / "spa" / "assets"
+    if not spa.exists():
+        pytest.skip("前端产物尚未构建")
+    js = next(spa.glob("*.js"), None)
+    assert js is not None
+
+    response = await anon.get(f"/assets/{js.name}")
+    assert response.status_code == 200
+    value = response.headers.get("cache-control") or ""
+    assert "immutable" in value, f"带哈希的产物没有 immutable：{value!r}"
+
+
+async def test_missing_static_is_not_long_cached(anon) -> None:
+    """404 不能被当成长缓存。
+
+    否则"之后把文件补上"永远看不到——浏览器会一直用缓存里的那个 404。
+    """
+    response = await anon.get("/assets/does-not-exist-abc123.js")
+    assert response.status_code == 404
+    value = response.headers.get("cache-control") or ""
+    assert "max-age=31536000" not in value, "404 被当成可长期缓存了"
+
+
 # --------------------------------------------------------------------------- #
 # 鉴权边界
 # --------------------------------------------------------------------------- #
