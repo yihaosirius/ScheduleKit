@@ -172,17 +172,6 @@ def test_home_widget_runs(family: str, api_server: str) -> None:
 
 
 @pytest.mark.parametrize("family", ["small", "medium", "large"])
-def test_home_widget_declares_vertical_main_axis(family: str, api_server: str) -> None:
-    """主轴必须显式声明为 vertical。
-
-    不声明时顶层 `addSpacer()` 不会产生"把后续内容推到底部"的效果，
-    组件会呈现为居中/错位。这是"布局奇怪"的直接原因之一。
-    """
-    tree = run_widget(family, api_server)["tree"]
-    assert tree["layout"] == "vertical", f"{family} 主轴是 {tree['layout']}"
-
-
-@pytest.mark.parametrize("family", ["small", "medium", "large"])
 def test_task_title_and_countdown_share_one_row(family: str, api_server: str) -> None:
     """任务标题必须挂在**横向 stack** 下，倒计时也要与它同一行。
 
@@ -258,12 +247,6 @@ def test_accessory_inline_is_one_short_line(api_server: str) -> None:
     assert len(lines) == 1, f"inline 只能有一行，实际 {len(lines)}：{lines}"
     assert "\n" not in lines[0]
     assert len(lines[0]) <= 40, f"inline 文本过长（锁屏会被截断）：{lines[0]!r}"
-
-
-@pytest.mark.parametrize("family", ["accessoryCircular", "accessoryRectangular"])
-def test_accessory_declares_vertical_axis(family: str, api_server: str) -> None:
-    tree = run_widget(family, api_server)["tree"]
-    assert tree["layout"] == "vertical"
 
 
 @pytest.mark.parametrize("family", ["accessoryCircular", "accessoryRectangular"])

@@ -55,17 +55,29 @@ function makeContainer(kind) {
   // 必须复用 makeText：文本元素上有 centerAlignText 等方法
   node.addText = (text) => addChild(node, makeText(String(text)));
   node.addSpacer = (n) => addChild(node, makeNode('spacer', { size: n === undefined ? null : n }));
-  node.layoutHorizontally = () => { node.layout = 'horizontal'; };
-  node.layoutVertically = () => { node.layout = 'vertical'; };
-  node.centerAlignContent = () => { node.alignContent = 'center'; };
-  node.topAlignContent = () => { node.alignContent = 'top'; };
-  node.bottomAlignContent = () => { node.alignContent = 'bottom'; };
   node.setPadding = (a, b, c, d) => { node.padding = [a, b, c, d]; };
   node.setWidget = () => {};
   node.presentSmall = async () => {};
   node.presentMedium = async () => {};
   node.presentLarge = async () => {};
   node.presentAccessoryRectangular = async () => {};
+
+  // ★★ 关键差异：`layoutVertically` / `layoutHorizontally` /
+  //    `centerAlignContent` / `topAlignContent` **只存在于 stack 元素**上，
+  //    ListWidget 没有这些方法。
+  //
+  //    之前这里的 ListWidget 也有它们，于是脚本里
+  //    `w.layoutVertically()` 这种真机会抛 TypeError 的写法，测试全绿 ——
+  //    真机上报 "w.layoutVertically is not a function" 才发现。
+  //    假 API 比真 API 宽松，就是在制造"测试通过但真机崩"。
+  if (kind === 'stack') {
+    node.layoutHorizontally = () => { node.layout = 'horizontal'; };
+    node.layoutVertically = () => { node.layout = 'vertical'; };
+    node.centerAlignContent = () => { node.alignContent = 'center'; };
+    node.topAlignContent = () => { node.alignContent = 'top'; };
+    node.bottomAlignContent = () => { node.alignContent = 'bottom'; };
+  }
+
   let bg = null;
   Object.defineProperty(node, 'backgroundColor', {
     get: () => bg, set: (v) => { bg = v; }, enumerable: true,
@@ -93,6 +105,8 @@ const keychainStore = new Map();
 let captured = null;
 
 const sandbox = {
+  // ListWidget：注意 makeContainer 只在 kind==='stack' 时提供
+  // layout*/alignContent 系列方法 —— 那正是真机的行为。
   ListWidget: function () { return makeContainer('list'); },
   Color: ColorCtor,
   Font: FontCtor,
